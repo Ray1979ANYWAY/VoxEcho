@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>正文提取预览 / Text Extraction Preview</title>
+    <style>
+      body {
+        width: 380px;
+        max-height: 560px;
+        overflow-y: auto;
+        font-family: -apple-system, "Microsoft YaHei", sans-serif;
+        padding: 12px;
+        margin: 0;
+      }
+      .item {
+        margin-bottom: 8px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .body { background: #f5f5f5; }
+      .heading { background: #fff3cd; font-weight: bold; }
+      .callout { background: #e8f0fe; }
+      .meta { font-size: 11px; color: #888; margin-bottom: 8px; word-break: break-all; }
+      .toolbar { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+      button { cursor: pointer; }
+      button:disabled { cursor: not-allowed; opacity: 0.5; }
+      select { flex: 1; min-width: 100px; }
+      .status { font-size: 12px; margin-bottom: 8px; min-height: 16px; }
+      .status.error { color: #c00; }
+      .status.ok { color: #2a7; }
+      .light {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #ccc;
+        margin-left: 4px;
+        vertical-align: middle;
+      }
+      .light.green { background: #2a7; }
+      .light.red { background: #c00; }
+      .hint {
+        font-size: 11px;
+        color: #888;
+        margin-left: 4px;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button id="refresh">刷新提取结果 / Refresh</button>
+      <select id="voice">
+        <optgroup label="中文 / Chinese">
+          <option value="zh-CN-XiaoxiaoNeural">中文女声 Xiaoxiao（大陆）</option>
+          <option value="zh-TW-HsiaoChenNeural">中文女声 Hsiao Chen（台湾）</option>
+          <option value="zh-CN-YunyangNeural">中文男声 Yunyang（大陆）</option>
+          <option value="zh-CN-YunjianNeural">中文男声 Yunjian（大陆）</option>
+          <option value="zh-HK-HiuMaanNeural">粤语女声 HiuMaan（香港）</option>
+          <option value="zh-HK-WanLungNeural">粤语男声 WanLung（香港）</option>
+        </optgroup>
+        <optgroup label="English">
+          <option value="en-US-AriaNeural">English Female Aria (US)</option>
+          <option value="en-US-MichelleNeural">English Female Michelle (US)</option>
+          <option value="en-GB-SoniaNeural">English Female Sonia (UK)</option>
+          <option value="en-US-GuyNeural">English Male Guy (US)</option>
+          <option value="en-US-AndrewNeural">English Male Andrew (US)</option>
+          <option value="en-GB-RyanNeural">English Male Ryan (UK)</option>
+        </optgroup>
+        <optgroup label="Español">
+          <option value="es-MX-DaliaNeural">Español Femenino Dalia (México)</option>
+          <option value="es-ES-ElviraNeural">Español Femenino Elvira (España)</option>
+          <option value="es-MX-JorgeNeural">Español Masculino Jorge (México)</option>
+          <option value="es-ES-AlvaroNeural">Español Masculino Álvaro (España)</option>
+        </optgroup>
+        <optgroup label="日本語">
+          <option value="ja-JP-NanamiNeural">日本語 女性 Nanami</option>
+          <option value="ja-JP-KeitaNeural">日本語 男性 Keita</option>
+        </optgroup>
+        <optgroup label="한국어">
+          <option value="ko-KR-SunHiNeural">한국어 여성 SunHi</option>
+          <option value="ko-KR-InJoonNeural">한국어 남성 InJoon</option>
+        </optgroup>
+      </select>
+    </div>
+    <div class="toolbar">
+      <label for="rate" style="font-size:12px;">语速 / Rate</label>
+      <select id="rate">
+        <option value="0.5">0.5x</option>
+        <option value="0.75">0.75x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
+        <option value="2">2x</option>
+      </select>
+    </div>
+    <div class="toolbar">
+      <button id="start">🔊 开始朗读 / Start Reading</button>
+      <button id="pauseResume">⏸ 暂停 / Pause</button>
+      <button id="stop">⏹ 停止 / Stop</button>
+      <span id="statusLight" class="light" title="灰色=未朗读 Idle，绿色=正常朗读 Reading，红色=正在重试连接 Retrying"></span>
+      <span class="hint" title="先点击书页获得焦点，再按 .">按 . 暂停/继续 · Press . to pause/resume</span>
+    </div>
+    <div class="toolbar">
+      <button id="seekBack">⏪ -5秒 / -5s</button>
+      <button id="seekForward">⏩ +5秒 / +5s</button>
+    </div>
+    <div class="toolbar">
+      <button id="exportLog">📋 导出日志 / Export Log</button>
+      <button id="clearLog">🗑 清空日志 / Clear Log</button>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="meta" id="meta">尚未提取 / Not extracted yet</div>
+    <div id="list"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>
