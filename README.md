@@ -1,60 +1,59 @@
-📖 VoxEcho - 网页版电子书朗读插件
-VoxEcho 是一款专为 Chrome 浏览器打造的免安装（绿色版）电子书辅助朗读工具，支持在网页端阅读时提供高质量的语音朗读体验。
+Read this in [English](README.md) | [中文](README_ZH.md)
 
-🌟 核心特性
-支持平台：Google Play Books、Koodo Reader（网页版）。
+---
 
-支持语言：中文、英语、西班牙语、日语、韩语。
+# 📖 VoxEcho - Web E-book Reader Extension
 
-快捷控制：支持使用主键盘或小键盘的半角句号 . 一键暂停与恢复朗读。
+VoxEcho is a standalone, portable (green edition) Chrome extension and desktop bridge tool designed to deliver high-quality text-to-speech (TTS) playback for web-based e-book readers.
 
-📥 安装与使用步骤
-1. 解压项目
-下载 VoxEcho.zip 压缩包并解压为 VoxEcho 文件夹，将其移动并保存至合适的本地目录（请勿删除或随意移动该目录）。解压后包含以下文件结构：
+### 🌟 Key Features
+* **Supported Platforms**: Google Play Books (Web) and Koodo Reader (Web).
+* **Supported Languages**: Chinese, English, Spanish, Japanese, and Korean.
+* **Shortcut Controls**: Press the period key `.` (on either the main keyboard or numpad) to quickly pause or resume playback.
 
-VoxEcho-extension/（浏览器插件目录）
+---
 
-VoxEcho-bridge.exe（本地桥接服务）
+### 📥 Installation & Setup
 
-2. 安装 Chrome 插件
-打开 Chrome 浏览器，在地址栏输入 chrome://extensions/ 并按回车。
+#### 1. Download & Extract
+Download the `VoxEcho.zip` package and extract it into a folder named `VoxEcho` at a local location of your choice (*do not delete or move this directory after setup*). 
 
-开启右上角的 开发者模式。
+Inside the extracted folder, you will find:
+* `VoxEcho-extension/` (Browser extension directory)
+* `VoxEcho-bridge.exe` (Local background service)
 
-点击左上角的 加载已解压的扩展程序，选择解压出来的 VoxEcho-extension 文件夹。
+#### 2. Install the Chrome Extension
+1. Open Google Chrome and navigate to `chrome://extensions/`.
+2. Enable **Developer mode** in the top-right corner.
+3. Click **Load unpacked** in the top-left corner, then select the `VoxEcho-extension` folder.
+4. Pin VoxEcho to your Chrome extension toolbar for quick access.
 
-安装成功后，建议在浏览器右上角的插件栏中将 VoxEcho 固定（Pin）以便快捷调出。
+#### 3. Run the Local Bridge Service
+Double-click `VoxEcho-bridge.exe`.
+* On the first run, the executable may automatically initialize and install missing runtime environments. Please wait patiently until setup completes.
+* Once initialized, the service will run silently in the background. You may optionally configure it to launch on system startup.
 
-3. 启动本地桥接服务
-双击运行 VoxEcho-bridge.exe。
+#### 4. Usage Instructions
+1. Open Google Play Books or Koodo Reader in Chrome and open a book.
+2. Click the VoxEcho icon in the toolbar to open the popup panel. The extension will automatically extract text from the active page.
+3. Select your preferred voice preset and playback speed, then click **Start Reading**.
+4. Press the `.` (period) key anytime during playback to pause or resume.
 
-首次运行时，程序可能会自动补全或初始化运行环境，请耐控等待。
+---
 
-初始化完成后，服务将在后台常驻运行。你可以根据需要将其设置为开机自启。
+### ⚠️ Disclaimer & Limitations
 
-4. 开始使用
-打开 Google Play Books 或 Koodo Reader 网页版并进入书籍阅读页面。
+Please read and agree to the following terms before using VoxEcho:
 
-点击 VoxEcho 插件图标打开 Popup 控制面板，此时面板将自动抓取并显示当前页面的文本。
+1. **DOM Structure Variations (Platform Updates)**
+   This extension relies on parsing the Document Object Model (DOM) of Google Play Books and Koodo Reader. If these platforms alter their frontend markup, DOM nodes, or security policies, text extraction may fail or function incorrectly. While updates will be released periodically, immediate compatibility with third-party platform updates is not guaranteed.
 
-选择所需的朗读音色与语速，点击 开始朗读。
+2. **Third-Party API Availability (Microsoft Edge TTS)**
+   The text-to-speech functionality relies on third-party public voice endpoints (Microsoft Edge TTS API). If Microsoft changes its API protocols, domain routing, rate limits, or discontinues public access, audio synthesis may experience latency, disruption, or service outage. The developer assumes no responsibility for the availability or stability of third-party interfaces.
 
-朗读过程中，按键盘上的句号键 .（主键盘或小键盘均可）即可随时暂停或恢复。
+3. **Software Usage & Liability**
+   * This project is a free, open-source personal utility provided strictly for educational and personal use. Commercial use is strictly prohibited.
+   * This software is provided **"AS IS"** without warranty of any kind. The developer shall not be liable for any direct or indirect issues, system errors, or data loss resulting from running `VoxEcho-bridge.exe` or using the extension.
 
-⚠️ 免责声明与使用限制 (Disclaimer)
-请在阅读并同意以下条款后再使用本项目：
-
-平台页面结构变动风险（DOM 变更）
-本插件依赖于 Google Play Books 及 Koodo Reader 网页端的 DOM 节点提取文本。若上述平台对网页前端结构、渲染机制或防爬策略进行更新或重构，可能导致插件暂时无法抓取文本或提取内容错乱。开发者将视情况维护更新，但不保证对平台变动的即时兼容。
-
-第三方语音接口可用性风险（微软 Edge TTS）
-本项目的语音合成功能依赖于第三方公共语音服务（Microsoft Edge TTS API）。若微软官方调整相关接口协议、域名解析、并发限制或停止对外提供相关服务，可能导致朗读功能不可用、卡顿或合成失败。开发者不对第三方接口的稳定性与可用性作任何形式的承诺。
-
-软件安全与免责
-
-本项目为免费开源/个人开发工具，仅供个人学习与交流使用，严禁用于任何商业用途。
-
-本软件“按原样”（AS IS）提供，开发者不承担因使用本软件（包括但不限于 VoxEcho-bridge.exe 的运行、网络请求、系统开机自启等）而导致的任何直接或间接数据损失、系统异常或法律责任。
-
-网络与代理说明
-若你开启了 Clash、v2rayN 等网络代理工具，可能会影响本地桥接服务与微软语音接口的连接。如遇到连接超时，请检查代理设置或将 speech.platform.bing.com 等相关域名加入直连（DIRECT）规则。
+4. **Network & Proxy Configuration**
+   If you use proxy client applications (e.g., Clash, v2rayN), network traffic generated by the local bridge service to Microsoft TTS servers may be routed through proxy nodes. If you experience connection timeouts or high latency, configure your proxy rules to route `speech.platform.bing.com` and related endpoints as `DIRECT`.
