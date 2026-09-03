@@ -10,3 +10,9 @@ VoxEcho 是一款专为 Chrome 浏览器打造的免安装（绿色版）电子�
 * **智能阅读辅助**：支持页末自动翻页，以及高亮文段视觉跟随（实时同步高亮当前朗读语句）。
 * **快捷控制**：支持使用主键盘或小键盘的半角句号 `.` 一键暂停与恢复朗读。
 
+### ☕ 支持本项目 (Support)
+
+如果你觉得 VoxEcho 对你有帮助，欢迎请我喝杯咖啡！
+If you find VoxEcho helpful, consider buying me a coffee!
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/rayhu)
