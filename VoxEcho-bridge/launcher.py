@@ -637,8 +637,31 @@ def set_windows_app_id(app_id: str = "VoxEcho.Bridge.1") -> None:
 def apply_window_icons(root) -> None:
     """
     设置窗口/任务栏图标。
+
+    【背景 / 为什么这样写】
     Tk 的 iconbitmap 在高 DPI 下常只用到 ico 里较小的一帧导致发糊；
     这里用 PIL 取出 ico 中最大一帧，再 iconphoto 提交高清图。
+
+    【历史修复记录（重要，勿回退）】
+    早期版本在 iconphoto(256px 高清) 之后无条件调用 iconbitmap(ico)，
+    后者会用 ico 里的 16x16 小帧覆盖掉刚提交的高清图，导致任务栏发糊。
+    已修复：iconbitmap 仅作 iconphoto 失败时的兜底，不再覆盖高清图。
+
+    【完整图标链路（配合 build.bat）】
+    - build.bat 的 --icon VoxEcho.ico
+      → 把 7 尺寸(16~256)图标内嵌进 exe 的 PE 资源
+      → 资源管理器里看 exe 文件 = 清晰（与运行时无关，一直正常）
+    - build.bat 的 --add-data VoxEcho.ico;.
+      → 把 ICO 打包进 PKG 归档
+      → 运行时 resource_path("VoxEcho.ico") 从解压目录取到 ICO
+      → 本函数取最大帧(256px)经 iconphoto 提交 = 任务栏清晰
+    - 发布只需单 exe：两条链路都在 exe 内部，无需 exe 旁再放 ico。
+
+    【警告】
+    对 onefile exe 运行 rcedit / Resource Hacker / UpdateResource
+    改图标会重写整个 exe 并丢弃末尾 PKG 归档（报 "embedded PKG
+    archive" 错误）。onefile 换图标只能用 tools/fix_exe_icon_safe.py
+    （注入后原样拼回 PKG），日常构建不需要。
     """
     ico = resolve_app_icon_ico()
     if ico is None:
