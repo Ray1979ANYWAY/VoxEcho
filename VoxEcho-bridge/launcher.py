@@ -131,6 +131,8 @@ _TEXTS = {
             "You can enable Start with Windows.\n"
             "Closing the window goes to the tray (if available)."
         ),
+        "already_running_title": "VoxEcho is already running",
+        "already_running_body": "VoxEcho bridge is already running. Please do not start it again.\nCheck the VoxEcho icon in the system tray.",
         "tray_show": "Show window",
         "tray_start": "Start service",
         "tray_stop": "Stop service",
@@ -170,7 +172,7 @@ _TEXTS = {
         "log_user_start": "—— User clicked Start ——",
         "log_health_ok": "Health check: OK",
         "log_health_fail": "Health check: failed",
-        "shortcut_name": "VoxEcho Voice Bridge.lnk",
+        "shortcut_name": "VoxEcho.lnk",
     },
     "zh-CN": {
         "title": "VoxEcho 语音桥接",
@@ -211,6 +213,8 @@ _TEXTS = {
             "可勾选「开机启动」。\n"
             "关闭窗口会进入托盘（若可用）。"
         ),
+        "already_running_title": "VoxEcho 已在运行",
+        "already_running_body": "检测到 VoxEcho 桥接已经在运行，请勿重复启动。\n请查看系统托盘中的 VoxEcho 图标。",
         "tray_show": "显示主窗口",
         "tray_start": "启动服务",
         "tray_stop": "停止服务",
@@ -250,7 +254,7 @@ _TEXTS = {
         "log_user_start": "—— 用户点击启动 ——",
         "log_health_ok": "健康检查：OK",
         "log_health_fail": "健康检查：失败",
-        "shortcut_name": "VoxEcho 语音桥接.lnk",
+        "shortcut_name": "VoxEcho.lnk",
     },
     "zh-TW": {
         "title": "VoxEcho 語音橋接",
@@ -291,6 +295,8 @@ _TEXTS = {
             "可勾選「開機啟動」。\n"
             "關閉視窗會進入系統匣（若可用）。"
         ),
+        "already_running_title": "VoxEcho 已在執行",
+        "already_running_body": "偵測到 VoxEcho 橋接已在執行，請勿重複啟動。\n請查看系統匣中的 VoxEcho 圖示。",
         "tray_show": "顯示主視窗",
         "tray_start": "啟動服務",
         "tray_stop": "停止服務",
@@ -330,7 +336,7 @@ _TEXTS = {
         "log_user_start": "—— 使用者點選啟動 ——",
         "log_health_ok": "健康檢查：OK",
         "log_health_fail": "健康檢查：失敗",
-        "shortcut_name": "VoxEcho 語音橋接.lnk",
+        "shortcut_name": "VoxEcho.lnk",
     },
 }
 
@@ -477,13 +483,18 @@ def create_shortcut(link_path: Path, target: Path) -> None:
     target_s = str(target).replace("'", "''")
     link_s = str(link_path).replace("'", "''")
     work_s = str(target.parent).replace("'", "''")
+    # IconLocation 显式指定 exe 内嵌图标（索引 0 = 第一个图标组，含 16~256 多尺寸）。
+    # 若不设置，Windows 会在创建快捷方式那一刻用"当前缓存的 exe 默认图标"渲染，
+    # 首次运行/exe 刚替换时可能没读到内嵌的清晰图标，导致桌面快捷方式图标发糊或显示旧图标。
+    icon_s = str(target).replace("'", "''")
     ps = (
         "$ws = New-Object -ComObject WScript.Shell; "
         "$s = $ws.CreateShortcut('%s'); "
         "$s.TargetPath = '%s'; "
         "$s.WorkingDirectory = '%s'; "
+        "$s.IconLocation = '%s,0'; "
         "$s.Save()"
-    ) % (link_s, target_s, work_s)
+    ) % (link_s, target_s, work_s, icon_s)
     subprocess.run(
         ["powershell", "-NoProfile", "-Command", ps],
         capture_output=True,
@@ -939,6 +950,43 @@ def run_gui():
     root.mainloop()
 
 
+_SINGLE_INSTANCE_MUTEX = None  # 进程存活期间持有，防 GC 导致互斥体释放
+
+
+def acquire_single_instance_mutex() -> bool:
+    """尝试获取单实例互斥体。
+
+    Windows 命名 Mutex：第一个进程 CreateMutexW 成功；后续进程再创建同名
+    互斥体时 GetLastError 返回 ERROR_ALREADY_EXISTS(183)，说明已有实例在运行。
+    用 'Local\\' 前缀：仅当前登录会话内互斥，避免不同 Windows 用户互相干扰。
+    返回 True = 本进程是唯一实例，可继续；False = 已有实例，应退出。
+    """
+    global _SINGLE_INSTANCE_MUTEX
+    if sys.platform != "win32":
+        return True  # 非 Windows 不做单实例限制
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        ERROR_ALREADY_EXISTS = 183
+        kernel32 = ctypes.windll.kernel32
+        CreateMutexW = kernel32.CreateMutexW
+        CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        CreateMutexW.restype = wintypes.HANDLE
+        GetLastError = kernel32.GetLastError
+        GetLastError.restype = wintypes.DWORD
+
+        handle = CreateMutexW(None, False, r"Local\VoxEcho.Bridge.SingleInstance")
+        if not handle:
+            return True  # 创建失败不阻塞启动
+        if GetLastError() == ERROR_ALREADY_EXISTS:
+            return False
+        _SINGLE_INSTANCE_MUTEX = handle  # 保持引用直到进程结束
+        return True
+    except Exception:
+        return True  # 检测失败不阻塞启动
+
+
 def main():
     if "--run-server" in sys.argv:
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -948,6 +996,20 @@ def main():
         from server import main as server_main
 
         server_main()
+        return
+    if not acquire_single_instance_mutex():
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(
+                t("already_running_title"), t("already_running_body")
+            )
+            root.destroy()
+        except Exception:
+            pass
         return
     run_gui()
 

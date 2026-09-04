@@ -1,3 +1,14 @@
+---
+
+# 📖 VoxEcho - Web E-book Reader Extension
+
+VoxEcho is a standalone, portable (green edition) Chrome extension and desktop bridge tool designed to deliver high-quality text-to-speech (TTS) playback for web-based e-book readers.
+
+### 🌟 Key Features
+* **Supported Platforms**: Google Play Books (Web) and Koodo Reader (Web).
+* **Supported Languages**: Chinese, English, Spanish, Japanese, and Korean.
+* **Auto-Paging & Visual Sync**: Automatic page turning at section ends, accompanied by synchronized visual text highlighting.
+* **Shortcut Controls**: Press the period key `.` (on either the main keyboard or numpad) to quickly pause or resume playback.
 
 
 # 📖 VoxEcho - 网页版电子书朗读插件
