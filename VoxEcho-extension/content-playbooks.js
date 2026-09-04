@@ -291,6 +291,60 @@
     return { skipPrefix };
   }
 
+  // 用户用鼠标选中了一段文字时，从这段文字的第一个字开始朗读。
+  // 返回 { skipPrefix }（与 findVisibleStartIndex 同一契约）：起点之前的全部正文文字。
+  // 没有有效选中（无选区 / 空选区 / 选中起点不在本帧正文里）返回 null，由调用方
+  // 回退到视口定位。这里读的是本帧自己的 window.getSelection()——本书正文所在的那个
+  // iframe 才是真正提取文字、回应起点查询的帧，选中文字也只会发生在那个帧里。
+  function findSelectionStartIndex() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return null;
+    const selText = sel.toString().replace(/\s+/g, " ").trim();
+    if (!selText) return null;
+
+    const extracted = extractWithElements();
+    if (!extracted) return null;
+
+    // 用 range 的 start 而不是 anchor/focus：无论用户是正选还是反选，
+    // start 始终是选中文字的真正起点（第一个字）。
+    const range = sel.getRangeAt(0);
+    const startNode = range.startContainer;
+    const startOffset = range.startOffset;
+
+    // 从选中起点向上找它所在的正文元素（跟提取用同一套 SELECTOR 对齐）
+    let targetEl = startNode.nodeType === Node.ELEMENT_NODE ? startNode : startNode.parentElement;
+    while (targetEl && !targetEl.matches(SELECTOR)) {
+      targetEl = targetEl.parentElement;
+    }
+    if (!targetEl) return null;
+
+    const idx = extracted.elements.indexOf(targetEl);
+    if (idx === -1) return null; // 起点不在当前这一页提取到的段落里，交给视口兜底
+
+    // 把"元素开头到选中起点"这段原始文本用 Range 量出来，得到原始字符偏移。
+    // 提取阶段做过规范化（连续空白压缩成空格、首尾去空白），原始偏移要换算成
+    // 规范化文本里的偏移，才能正确地在 extracted.data[idx].text 上做 slice。
+    let rawOffset = null;
+    try {
+      const measure = document.createRange();
+      measure.selectNodeContents(targetEl);
+      measure.setEnd(startNode, startOffset);
+      rawOffset = measure.toString().length;
+    } catch (e) {
+      rawOffset = null;
+    }
+    if (rawOffset === null) return null;
+
+    const rawPrefix = targetEl.textContent.slice(0, rawOffset);
+    const normalizedOffset = rawPrefix.replace(/\s+/g, " ").trimStart().length;
+    const skipPrefix = buildSkipPrefix(extracted.data, idx, normalizedOffset);
+    diagLog(`选中文本起点定位 segmentIndex=${idx}, charOffset=${normalizedOffset}`, {
+      selLen: selText.length,
+      preview: extracted.data[idx].text.slice(normalizedOffset, normalizedOffset + 20),
+    });
+    return { skipPrefix };
+  }
+
   function reportIfChanged() {
     const data = extractCurrentPageText();
 
@@ -691,8 +745,13 @@
     if (message.type === "PLAYBOOKS_GET_START_INDEX") {
       // 顶层 play.google.com frame 没有正文，不回应，让真正有正文的 iframe 回答
       if (!window.__hasEverMatched) return;
-      const result = findVisibleStartIndex();
-      diagLog(`回应起点查询：skipPrefix 长度=${(result.skipPrefix || "").length}`);
+      // 优先：用户用鼠标选中了一段文字，就从选中文字的第一个字开始朗读；
+      // 没有有效选中（或选中的起点不在正文里）再回退到"视口内第一个完整句子"。
+      const selectionResult = findSelectionStartIndex();
+      const result = selectionResult || findVisibleStartIndex();
+      diagLog(`回应起点查询：skipPrefix 长度=${(result.skipPrefix || "").length}`, {
+        fromSelection: !!selectionResult,
+      });
       sendResponse(result);
       return true;
     }

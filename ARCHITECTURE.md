@@ -81,8 +81,8 @@ D:\Documents\VoxEcho\
 |------|------|
 | `background-playbooks.js` | Play Books 专属：文本提取结果缓存（`chrome.storage.session`）、朗读状态机、翻页等待/重试、内容对齐校验（防止缩水循环重播）、跨页残句（X 区）拼接、自动翻页上限控制 |
 | `background-koodo.js` | Koodo 专属：整章内容一次性提取完成，无翻页状态机，直接切块→发 offscreen 播放。当前已实现：整章缓存、从当前可见段开始朗读、暂停/继续/停止/语速/进度；高亮与自动翻章标注为后续待做 |
-| `content-playbooks.js` | 注入 Play Books 顶层页面与正文 iframe。从 DOM 按标签（`p, h1~h6`）提取正文段落，过滤分页延续箭头，合并被硬切的碎片段落 |
-| `content-koodo.js` | 注入 Koodo 页面。因正文装在 `iframe#kookit-iframe`（sandbox 未开 allow-scripts，不能注入），只能从顶层页面跨边界读 `contentDocument`。检测整章刷新后重新提取，并定位视口内当前段作为朗读起点 |
+| `content-playbooks.js` | 注入 Play Books 顶层页面与正文 iframe。从 DOM 按标签（`p, h1~h6`）提取正文段落，过滤分页延续箭头，合并被硬切的碎片段落；响应起点查询时优先用「用户鼠标选中的文字」定位朗读起点，无选中再回退到视口内第一个完整句子 |
+| `content-koodo.js` | 注入 Koodo 页面。因正文装在 `iframe#kookit-iframe`（sandbox 未开 allow-scripts，不能注入），只能从顶层页面跨边界读 `contentDocument`。检测整章刷新后重新提取，并定位视口内当前段作为朗读起点；同样支持「选中文字优先作为朗读起点」 |
 
 ### 3.3 平台无关共享模块
 
@@ -97,7 +97,7 @@ D:\Documents\VoxEcho\
 
 | 文件 | 职责 |
 |------|------|
-| `popup.html` / `popup.js` | 扩展弹窗：开始/暂停/继续/停止按钮（状态联动禁用）、语速调整、显示当前标签页提取内容预览、导出/清空诊断日志 |
+| `popup.html` / `popup.js` | 扩展弹窗：开始/暂停/继续/停止按钮（状态联动禁用）、语速调整、显示当前标签页提取内容预览、导出/清空诊断日志。界面按浏览器系统语言自动选择 6 套语言包（简中/繁中/英/西/日/韩），其余语言兜底英文；朗读起点注释「从选定文本开始朗读，或者从页首开始朗读」随语言切换 |
 | `_locales/` | `zh_CN` / `en` 多语言（扩展名称、描述） |
 | `server/` | 开发期未打包时使用的备用独立 server（功能与 bridge 的 server.py 相同，代码更简，无 rate 支持） |
 
@@ -140,7 +140,10 @@ content-playbooks.js 从 DOM 提取正文段落
 background.js 按 sender.tab.url 路由到 background-playbooks.js
    │  文本缓存到 chrome.storage.session
    ▼
-用户点 popup「开始」 → chunking.js 按字数/标点切块
+用户点 popup「开始」 → content 先查「鼠标选中文字」再查「视口内完整句子」
+   │  确定朗读起点（起点之前的正文作为 skipPrefix 交给后台裁掉）
+   ▼
+chunking.js 按字数/标点切块
    │
    ▼
 background-playbooks.js 把文本块发给 offscreen.js
@@ -175,6 +178,8 @@ offscreen.js 播放 MP3；同时上报 HIGHLIGHT_CHUNK 高亮当前句
 | Play Books DOM 适配 | 不同书渲染引擎不同，class 名每本书动态分配不可依赖 → 改为按标签（`p`/`h1~h6`）识别，过滤分页箭头用内容正则而非 class |
 | Koodo iframe 限制 | `iframe#kookit-iframe` sandbox 未开 allow-scripts，无法注入 → 顶层页面跨边界读 `contentDocument`（sandbox 开了 allow-same-origin，允许读） |
 | 文本切块粒度 | 纯按标点切会把中文对话切太碎 → 改成"先攒 30 字，够字再找标点收尾"；引号类收尾符并入上一句 |
+| 朗读起点优先级 | 用户点「开始」时：① 若书页里有鼠标选中的文字（非空选区、起点落在正文段落里），从选中的第一个字开始朗读（选中可能跨段，只取起点）；② 无选中则按视口内第一个完整句子起读。两个平台共用这套规则，各自用 `skipPrefix`（Play Books）/ `segmentIndex+charOffset`（Koodo）实现 |
+| 弹窗多语言 | 手动 JS 字典方案（不用 chrome.i18n）：`popup.js` 里按浏览器系统语言（`chrome.i18n.getUILanguage()`）选语言包，简中/繁中/英文为精修基准文案，西/日/韩以英文为源文本翻译；命中 es/ja/ko 及其地区变体用对应语言包，其余语言兜底英文。加语言 = 往 `I18N` 加一个字典块 |
 | 合成失败处理 | server 侧 edge_tts 重试 3 次（连接不稳时大概率一两次即过）；offscreen 侧单块再重试 3 次；**不加** asyncio 强制超时（实测在 Windows 上与 edge-tts WebSocket 不兼容，反而全超时），极端卡顿由扩展 background 监控兜底 |
 | offscreen 被回收 | Chrome 会关闭长时间无声的 offscreen → 每次发送前重新确认存在，失败重建重试 |
 | onefile 图标 | PyInstaller `--icon` 会把完整 7 尺寸嵌入 exe（无"只嵌 16/32"限制）。**对 onefile 跑 rcedit/UpdateResource 会毁 PKG**；换图标唯一安全路径是 `tools/fix_exe_icon_safe.py`（注入后拼回 PKG） |

@@ -2,10 +2,11 @@
 """
 ebooks-tts bridge launcher
 Left controls + right terminal log + tray
-UI language: zh-CN / zh-TW / en (auto from system)
+UI language: zh-CN / zh-TW / en / es / ja / ko (auto from system)
 """
 from __future__ import annotations
 
+import base64
 import json
 import locale
 import os
@@ -22,12 +23,17 @@ HOST, PORT = "127.0.0.1", 5005
 REQUIRED_PKGS = ["edge-tts", "flask", "flask-cors"]
 MIN_PY = (3, 10)
 
+KO_FI_URL = "https://ko-fi.com/rayhu"
+# Ko-fi 咖啡杯图标（浅蓝圆角底 + 白杯 + 橙心），20x20 PNG base64，
+# 供 tk.PhotoImage(data=...) 内嵌显示，无需额外资源文件。
+KO_FI_ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAD1ElEQVR4nJWUX2gcRRzHP/Nn9/bucneStA1tqq3RmFBCHwotFrFFVIJ5qLVQFCwoKFTsg6IUH0sf9FFQUbAKIlKQ9sEHY+tTiyL+qWhQLFaM2pimtsnlrpfby93e7szIXkwaJRZdmIednfnu5zu/7/yEc04IIRzA4ffDUdCjzpqcMUZwo0eCUtoIqc7WquUPjh3sWzhyxMl0k3jmnWrJC/zjSmdGhZAgbqy1/LgOB9a0v49a7Udeeaz4ozhy1un5S/Njhe7iSH2uZsR/FVvWdGSLJdVqhJPCsEOH0/P3+0HXSL0ynwgp9f9SS+0JQatei4Ou0qZWIzykHfJBIaUTcB3NORw2Xb4aU2e+czRLM0KouN12ztk9GlywcqdzFu35SJ3t2FmdCkx7AWNMh3AFbCa1aFeKeX6Wyuxl6pe+Qet/noDAOYNTObo3byeXzZIk8QocYbVzi68pjfZ9KrOX6K2d5tmHt5PNFzo0SxTpmnSUy2XePXWSxq37yGZ87F+KDidWIDiEDqhPfs7RQ/exYdPgvxaifwCazQWOfTHBmm07qc9dW/6mU8fCLQ5nDPnAxw/yWGsXc6bUsiO3VBJjuGlNHzM/f4RpXKZveOS6oJEBkZa0vALa0zTxsSZBpgZSsfIUjL0OPX2I6hXsthHk8C6isEr54jgiDhHSo3/HHuJWA702/JVSZHHhDDbbQ649hc7vAqmgGcJL++HCV5DNQ9KGU2/Ca19jlKR7wxY2bNlNvTy5fLm00Rny8RS3XTnNwNyXrK//hHjxBDz0PGL4bggrUOxetB/kYW4Grl1F+AEL1WnmZyaQKnPdciVYT62rn3Ol3eSFIfjuLV4Y+oPimfdw336MuGMHnP8MNg7C3DTc+zgM3ElmfBxjE8LyJIP3HCSOkk7YtbJtgjiDjKqIbDe/qV6aex+lWCjA1Ytw5RfYuQ/6t3bOET/bIUniFoO7n+CW4buIwrBTUKRIqyxxQjorFApL4CK8hSomCHC9mxG9mxe9NOZBZ7DtNk5pPM8jiSokbYM1MVJ7nWslpXBn0iSkkZVS0nI5ZmZnUJ6X/g21NPJFlJR4vo9Skt+nptG5NQhsmmCrvUzaVT8Vh9+eLSQZ/1y2UByKGvW4GUXKTpzkge3r6CqUOhf3bzm0lnKlxth4zNqtewVJZLwgr20cNy1mW2ftc8dbQ8rjQ60zt6cbmq2IyvSFVbuCswYvKLJ24wCYCKkzOBvX4qh54OUDpTGRtu2jR4V96o2JdYWem592Jh5FiJzn51KiVbuts0kaYie0Z5TWn7RqlWOvPrn+h/0nnPoTApGxu3uuaQMAAAAASUVORK5CYII="
+
 # ---------------------------------------------------------------------------
 # i18n
 # ---------------------------------------------------------------------------
 
 def detect_ui_lang() -> str:
-    """Return 'zh-CN' | 'zh-TW' | 'en'."""
+    """Return 'zh-CN' | 'zh-TW' | 'en' | 'es' | 'ja' | 'ko'."""
     candidates = []
     try:
         loc = locale.getdefaultlocale()
@@ -86,7 +92,13 @@ def detect_ui_lang() -> str:
         if "zh_tw" in blob or "zh_hk" in blob or "zh_mo" in blob or "hant" in blob:
             return "zh-TW"
         return "zh-CN"
-    return "en"
+    if any(x in blob for x in ("es_", "spanish")):
+        return "es"  # 西班牙语（覆盖所有西语地区变体）
+    if any(x in blob for x in ("ja_", "japanese")):
+        return "ja"  # 日语
+    if any(x in blob for x in ("ko_", "korean")):
+        return "ko"  # 韩语
+    return "en"  # 其余一律英文兜底
 
 
 _LANG = detect_ui_lang()
@@ -112,8 +124,12 @@ _TEXTS = {
             "How to use:\n"
             "1. Keep this app running (window or tray)\n"
             "2. Load the extension in Chrome\n"
-            "3. Open Play Books / Koodo and start reading"
+            "3. Open a book in the web Play Books / Koodo, "
+            "select the text with the mouse to start reading from there, "
+            "or start from the page top by default\n"
+            "4. Pause/resume hotkey: ."
         ),
+        "sponsor": "If you find VoxEcho helpful, consider buying me a coffee!",
         "log_title": "Log (terminal)",
         "env_error_title": "Environment error",
         "env_error_body": "Dependencies are not ready. See the log panel.",
@@ -194,8 +210,11 @@ _TEXTS = {
             "使用顺序：\n"
             "1. 本程序保持运行（窗口或托盘）\n"
             "2. Chrome 加载扩展\n"
-            "3. 打开 Play 图书 / Koodo 朗读"
+            "3. 打开网页版 Google Play 图书 / Koodo 里面的图书，"
+            "鼠标选定文本开始朗读，或者默认从页首开始朗读\n"
+            "4. 暂停/恢复的快捷键：."
         ),
+        "sponsor": "如果你觉得 VoxEcho 对你有帮助，欢迎请我喝杯咖啡！",
         "log_title": "运行日志（终端）",
         "env_error_title": "环境错误",
         "env_error_body": "依赖未就绪，请查看右侧日志。",
@@ -276,8 +295,11 @@ _TEXTS = {
             "使用順序：\n"
             "1. 本程式保持執行（視窗或系統匣）\n"
             "2. 在 Chrome 載入擴充功能\n"
-            "3. 開啟 Play 圖書 / Koodo 並朗讀"
+            "3. 打開網頁版 Google Play 圖書 / Koodo 裡面的書籍，"
+            "用滑鼠選定文字開始朗讀，或預設從頁首開始朗讀\n"
+            "4. 暫停/繼續的快捷鍵：."
         ),
+        "sponsor": "如果你覺得 VoxEcho 對你有幫助，歡迎請我喝杯咖啡！",
         "log_title": "執行記錄（終端）",
         "env_error_title": "環境錯誤",
         "env_error_body": "相依套件未就緒，請查看右側記錄。",
@@ -336,6 +358,266 @@ _TEXTS = {
         "log_user_start": "—— 使用者點選啟動 ——",
         "log_health_ok": "健康檢查：OK",
         "log_health_fail": "健康檢查：失敗",
+        "shortcut_name": "VoxEcho.lnk",
+    },
+    "es": {
+        "title": "Puente de voz de VoxEcho",
+        "heading": "Puente local de VoxEcho",
+        "status_stopped": "Estado: detenido",
+        "status_running": "Estado: en ejecución  http://{host}:{port}",
+        "status_env_bad": "Estado: entorno no listo",
+        "hint": (
+            "Mantén este programa en ejecución para que la extensión de Chrome "
+            "pueda leer en voz alta.\n"
+            "Al cerrar la ventana se minimiza a la bandeja (no se cierra).\n"
+            "Para salir del todo: icono de la bandeja → Salir."
+        ),
+        "autostart": "Iniciar con Windows (mantener en ejecución)",
+        "btn_start": "Iniciar servicio",
+        "btn_stop": "Detener servicio",
+        "btn_health": "Comprobar estado",
+        "btn_open_health": "Abrir página de estado",
+        "howto": (
+            "Cómo usar:\n"
+            "1. Mantén esta aplicación en ejecución (ventana o bandeja)\n"
+            "2. Carga la extensión en Chrome\n"
+            "3. Abre un libro en la versión web de Play Books / Koodo, "
+            "selecciona el texto con el ratón para empezar a leer desde ahí, "
+            "o empieza desde el principio de la página por defecto\n"
+            "4. Atajo de pausa/reanudar: ."
+        ),
+        "sponsor": "Si VoxEcho te resulta útil, ¡invítame un café!",
+        "log_title": "Registro (terminal)",
+        "env_error_title": "Error de entorno",
+        "env_error_body": "Las dependencias no están listas. Consulta el panel de registro.",
+        "start_warn_title": "Iniciar",
+        "start_warn_body": "Es posible que el servicio no esté listo. Consulta el panel de registro.",
+        "health_ok_title": "Comprobación de estado",
+        "health_ok_body": "El servicio está sano\nhttp://{host}:{port}/health",
+        "health_fail_title": "Comprobación de estado",
+        "health_fail_body": "Sin respuesta. Inicia el servicio primero.",
+        "exit_confirm_title": "Salir",
+        "exit_confirm_body": "La extensión no podrá leer en voz alta después de salir. ¿Salir de todos modos?",
+        "welcome_title": "Bienvenido al puente de VoxEcho",
+        "welcome_body": (
+            "Mantén este programa en ejecución para que la extensión de Chrome "
+            "pueda leer en voz alta.\n\n"
+            "Puedes activar «Iniciar con Windows».\n"
+            "Al cerrar la ventana se pasa a la bandeja (si está disponible)."
+        ),
+        "already_running_title": "VoxEcho ya está en ejecución",
+        "already_running_body": "El puente de VoxEcho ya está en ejecución. No lo inicies de nuevo.\nConsulta el icono de VoxEcho en la bandeja del sistema.",
+        "tray_show": "Mostrar ventana",
+        "tray_start": "Iniciar servicio",
+        "tray_stop": "Detener servicio",
+        "tray_exit": "Salir",
+        "tray_tooltip": "Puente de VoxEcho",
+        "log_packed": "Ejecutándose como aplicación empaquetada; se omiten las comprobaciones de Python/pip.",
+        "log_python": "Python: {v}",
+        "log_need_py": "Error: se necesita Python >= {a}.{b}",
+        "log_deps_ok": "Dependencias correctas.",
+        "log_deps_missing": "Faltan: {pkgs}. Instalando con pip…",
+        "log_pip_fail": "pip falló: {err}",
+        "log_pip_ok": "Dependencias instaladas.",
+        "log_pip_exc": "Error de pip: {e}",
+        "log_already": "El servicio ya está en ejecución.",
+        "log_reuse": "Ya hay un servicio sano en el puerto; se reutiliza.",
+        "log_port_busy": "El puerto {port} está en uso por otro programa.",
+        "log_start_cmd": "Iniciando: {cmd}",
+        "log_start_fail": "Error al iniciar: {e}",
+        "log_ready": "Puente listo -> http://{host}:{port}",
+        "log_proc_exit": "El proceso del servicio ha terminado.",
+        "log_timeout": "Se agotó el tiempo de espera. Consulta el registro.",
+        "log_not_running": "El servicio no está en ejecución.",
+        "log_stopping": "Deteniendo el servicio…",
+        "log_stopped": "Servicio detenido.",
+        "log_shortcut_ok": "Acceso directo creado: {name}",
+        "log_shortcut_fail": "No se pudo crear el acceso directo (ignorado): {e}",
+        "log_autostart_on": "Iniciar con Windows: activado.",
+        "log_autostart_off": "Iniciar con Windows: desactivado.",
+        "log_autostart_fail": "Error al configurar el inicio automático: {e}",
+        "log_autostart_os": "El inicio automático solo está disponible en Windows.",
+        "log_tray_ok": "Icono de bandeja listo.",
+        "log_tray_missing": "pystray/Pillow no instalados; al cerrar la ventana se preguntará si quieres salir.",
+        "log_min_tray": "Minimizado a la bandeja.",
+        "log_boot": "Iniciador del puente de voz de VoxEcho",
+        "log_workdir": "Directorio de trabajo: {d}",
+        "log_first": "Configuración inicial completada.",
+        "log_user_start": "—— El usuario hizo clic en Iniciar ——",
+        "log_health_ok": "Comprobación de estado: correcta",
+        "log_health_fail": "Comprobación de estado: fallida",
+        "shortcut_name": "VoxEcho.lnk",
+    },
+    "ja": {
+        "title": "VoxEcho 音声ブリッジ",
+        "heading": "VoxEcho ローカルブリッジ",
+        "status_stopped": "状態: 停止中",
+        "status_running": "状態: 実行中  http://{host}:{port}",
+        "status_env_bad": "状態: 環境が未準備",
+        "hint": (
+            "Chrome 拡張機能が読み上げるには、このプログラムを起動したままにしてください。\n"
+            "ウィンドウを閉じるとトレイに最小化されます（終了しません）。\n"
+            "完全に終了するには: トレイのアイコン → 終了。"
+        ),
+        "autostart": "Windows 起動時に自動起動（常駐）",
+        "btn_start": "サービスを開始",
+        "btn_stop": "サービスを停止",
+        "btn_health": "ヘルスチェック",
+        "btn_open_health": "ヘルスページを開く",
+        "howto": (
+            "使い方:\n"
+            "1. このアプリを起動したままにする（ウィンドウまたはトレイ）\n"
+            "2. Chrome で拡張機能を読み込む\n"
+            "3. ウェブ版の Play Books / Koodo で本を開き、"
+            "マウスでテキストを選択してそこから読み上げを開始するか、"
+            "既定ではページの先頭から読み上げます\n"
+            "4. 一時停止/再開のショートカット: ."
+        ),
+        "sponsor": "VoxEcho が役に立ったら、コーヒーをごちそうしてください！",
+        "log_title": "ログ（ターミナル）",
+        "env_error_title": "環境エラー",
+        "env_error_body": "依存関係が未準備です。右側のログパネルを確認してください。",
+        "start_warn_title": "開始",
+        "start_warn_body": "サービスがまだ準備できていない可能性があります。ログパネルを確認してください。",
+        "health_ok_title": "ヘルスチェック",
+        "health_ok_body": "サービスは正常です\nhttp://{host}:{port}/health",
+        "health_fail_title": "ヘルスチェック",
+        "health_fail_body": "応答がありません。先にサービスを開始してください。",
+        "exit_confirm_title": "終了",
+        "exit_confirm_body": "終了すると拡張機能は読み上げられなくなります。それでも終了しますか？",
+        "welcome_title": "VoxEcho ブリッジへようこそ",
+        "welcome_body": (
+            "Chrome 拡張機能が読み上げるには、このプログラムを起動したままにしてください。\n\n"
+            "「Windows 起動時に自動起動」を有効にできます。\n"
+            "ウィンドウを閉じるとトレイに移動します（利用可能な場合）。"
+        ),
+        "already_running_title": "VoxEcho は既に実行中です",
+        "already_running_body": "VoxEcho ブリッジは既に実行中です。再度起動しないでください。\nシステムトレイの VoxEcho アイコンを確認してください。",
+        "tray_show": "ウィンドウを表示",
+        "tray_start": "サービスを開始",
+        "tray_stop": "サービスを停止",
+        "tray_exit": "終了",
+        "tray_tooltip": "VoxEcho ブリッジ",
+        "log_packed": "パッケージ版として実行中。Python / pip のチェックをスキップします。",
+        "log_python": "Python: {v}",
+        "log_need_py": "エラー: Python >= {a}.{b} が必要です",
+        "log_deps_ok": "依存関係は正常です。",
+        "log_deps_missing": "不足: {pkgs}。pip でインストール中…",
+        "log_pip_fail": "pip が失敗しました: {err}",
+        "log_pip_ok": "依存関係をインストールしました。",
+        "log_pip_exc": "pip エラー: {e}",
+        "log_already": "サービスは既に実行中です。",
+        "log_reuse": "ポートに正常なサービスがあるため、それを再利用します。",
+        "log_port_busy": "ポート {port} は別のプログラムが使用中です。",
+        "log_start_cmd": "起動中: {cmd}",
+        "log_start_fail": "起動に失敗しました: {e}",
+        "log_ready": "ブリッジ準備完了 -> http://{host}:{port}",
+        "log_proc_exit": "サービスプロセスが終了しました。",
+        "log_timeout": "準備完了の待機がタイムアウトしました。ログを確認してください。",
+        "log_not_running": "サービスは実行されていません。",
+        "log_stopping": "サービスを停止中…",
+        "log_stopped": "サービスを停止しました。",
+        "log_shortcut_ok": "デスクトップのショートカットを作成しました: {name}",
+        "log_shortcut_fail": "デスクトップのショートカットの作成に失敗しました（無視）: {e}",
+        "log_autostart_on": "Windows 起動時に自動起動: 有効。",
+        "log_autostart_off": "Windows 起動時に自動起動: 無効。",
+        "log_autostart_fail": "自動起動の設定に失敗しました: {e}",
+        "log_autostart_os": "自動起動は Windows でのみ対応しています。",
+        "log_tray_ok": "トレイアイコンの準備ができました。",
+        "log_tray_missing": "pystray/Pillow がインストールされていないため、ウィンドウを閉じると終了確認が表示されます。",
+        "log_min_tray": "トレイに最小化しました。",
+        "log_boot": "VoxEcho 音声ブリッジ ランチャー",
+        "log_workdir": "作業ディレクトリ: {d}",
+        "log_first": "初回セットアップが完了しました。",
+        "log_user_start": "—— ユーザーが「開始」をクリックしました ——",
+        "log_health_ok": "ヘルスチェック: OK",
+        "log_health_fail": "ヘルスチェック: 失敗",
+        "shortcut_name": "VoxEcho.lnk",
+    },
+    "ko": {
+        "title": "VoxEcho 음성 브리지",
+        "heading": "VoxEcho 로컬 브리지",
+        "status_stopped": "상태: 중지됨",
+        "status_running": "상태: 실행 중  http://{host}:{port}",
+        "status_env_bad": "상태: 환경 준비 안 됨",
+        "hint": (
+            "Chrome 확장 프로그램이 읽어주려면 이 프로그램을 계속 실행해 두세요.\n"
+            "창을 닫으면 트레이로 최소화됩니다(종료되지 않음).\n"
+            "완전히 종료하려면: 트레이 아이콘 → 종료."
+        ),
+        "autostart": "Windows 시작 시 자동 실행(상주)",
+        "btn_start": "서비스 시작",
+        "btn_stop": "서비스 중지",
+        "btn_health": "상태 확인",
+        "btn_open_health": "상태 페이지 열기",
+        "howto": (
+            "사용 방법:\n"
+            "1. 이 앱을 계속 실행해 둡니다(창 또는 트레이)\n"
+            "2. Chrome에서 확장 프로그램을 불러옵니다\n"
+            "3. 웹 버전의 Play Books / Koodo에서 책을 열고 "
+            "마우스로 텍스트를 선택해 그 부분부터 읽기를 시작하거나, "
+            "기본적으로 페이지 맨 위부터 읽습니다\n"
+            "4. 일시정지/재개 단축키: ."
+        ),
+        "sponsor": "VoxEcho가 도움이 되셨다면 커피 한 잔 사주시면 감사하겠습니다!",
+        "log_title": "로그(터미널)",
+        "env_error_title": "환경 오류",
+        "env_error_body": "종속 패키지가 준비되지 않았습니다. 오른쪽 로그 패널을 확인하세요.",
+        "start_warn_title": "시작",
+        "start_warn_body": "서비스가 아직 준비되지 않았을 수 있습니다. 로그 패널을 확인하세요.",
+        "health_ok_title": "상태 확인",
+        "health_ok_body": "서비스가 정상입니다\nhttp://{host}:{port}/health",
+        "health_fail_title": "상태 확인",
+        "health_fail_body": "응답이 없습니다. 먼저 서비스를 시작하세요.",
+        "exit_confirm_title": "종료",
+        "exit_confirm_body": "종료하면 확장 프로그램이 더 이상 읽어줄 수 없습니다. 그래도 종료하시겠습니까?",
+        "welcome_title": "VoxEcho 브리지에 오신 것을 환영합니다",
+        "welcome_body": (
+            "Chrome 확장 프로그램이 읽어주려면 이 프로그램을 계속 실행해 두세요.\n\n"
+            "「Windows 시작 시 자동 실행」을 사용하도록 설정할 수 있습니다.\n"
+            "창을 닫으면 트레이로 이동합니다(사용 가능한 경우)."
+        ),
+        "already_running_title": "VoxEcho가 이미 실행 중입니다",
+        "already_running_body": "VoxEcho 브리지가 이미 실행 중입니다. 다시 시작하지 마세요.\n시스템 트레이의 VoxEcho 아이콘을 확인하세요.",
+        "tray_show": "창 표시",
+        "tray_start": "서비스 시작",
+        "tray_stop": "서비스 중지",
+        "tray_exit": "종료",
+        "tray_tooltip": "VoxEcho 브리지",
+        "log_packed": "패키지 앱으로 실행 중. Python/pip 검사를 건너뜁니다.",
+        "log_python": "Python: {v}",
+        "log_need_py": "오류: Python >= {a}.{b} 필요",
+        "log_deps_ok": "종속 패키지가 정상입니다.",
+        "log_deps_missing": "부족: {pkgs}. pip로 설치 중…",
+        "log_pip_fail": "pip 실패: {err}",
+        "log_pip_ok": "종속 패키지를 설치했습니다.",
+        "log_pip_exc": "pip 오류: {e}",
+        "log_already": "서비스가 이미 실행 중입니다.",
+        "log_reuse": "포트에 정상 서비스가 있어 그대로 사용합니다.",
+        "log_port_busy": "포트 {port}가 다른 프로그램에 사용 중입니다.",
+        "log_start_cmd": "시작 중: {cmd}",
+        "log_start_fail": "시작 실패: {e}",
+        "log_ready": "브리지 준비 완료 -> http://{host}:{port}",
+        "log_proc_exit": "서비스 프로세스가 종료되었습니다.",
+        "log_timeout": "준비 대기가 시간 초과되었습니다. 로그를 확인하세요.",
+        "log_not_running": "서비스가 실행 중이 아닙니다.",
+        "log_stopping": "서비스 중지 중…",
+        "log_stopped": "서비스를 중지했습니다.",
+        "log_shortcut_ok": "바탕 화면 바로 가기 생성: {name}",
+        "log_shortcut_fail": "바탕 화면 바로 가기 생성 실패(무시): {e}",
+        "log_autostart_on": "Windows 시작 시 자동 실행: 사용.",
+        "log_autostart_off": "Windows 시작 시 자동 실행: 사용 안 함.",
+        "log_autostart_fail": "자동 실행 설정 실패: {e}",
+        "log_autostart_os": "자동 실행은 Windows에서만 지원됩니다.",
+        "log_tray_ok": "트레이 아이콘이 준비되었습니다.",
+        "log_tray_missing": "pystray/Pillow가 설치되지 않아 창을 닫으면 종료 여부를 묻습니다.",
+        "log_min_tray": "트레이로 최소화했습니다.",
+        "log_boot": "VoxEcho 음성 브리지 런처",
+        "log_workdir": "작업 디렉터리: {d}",
+        "log_first": "첫 실행 설정을 완료했습니다.",
+        "log_user_start": "—— 사용자가 시작을 클릭함 ——",
+        "log_health_ok": "상태 확인: 정상",
+        "log_health_fail": "상태 확인: 실패",
         "shortcut_name": "VoxEcho.lnk",
     },
 }
@@ -836,6 +1118,24 @@ def run_gui():
 
     ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
     ttk.Label(left, text=t("howto"), wraplength=280, justify="left").pack(anchor="w")
+
+    # 赞助入口：Ko-fi 图标 + 文案，点击打开赞助页
+    sponsor_img = tk.PhotoImage(data=KO_FI_ICON_B64)
+    sponsor_lbl = tk.Label(
+        left,
+        image=sponsor_img,
+        text=t("sponsor"),
+        compound="left",
+        fg="#888",
+        cursor="hand2",
+        justify="left",
+        anchor="w",
+        wraplength=280,
+    )
+    sponsor_lbl.pack(anchor="w", pady=(6, 0))
+    sponsor_lbl.bind("<Button-1>", lambda _e: webbrowser.open(KO_FI_URL))
+    # 防止图片被 GC 回收
+    root._voxecho_sponsor_img = sponsor_img  # type: ignore[attr-defined]
 
     ttk.Label(right, text=t("log_title"), font=("", 10, "bold")).pack(anchor="w")
     log_text = scrolledtext.ScrolledText(
