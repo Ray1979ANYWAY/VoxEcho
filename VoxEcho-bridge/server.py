@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 from typing import Optional
 
 import edge_tts
@@ -26,6 +27,59 @@ DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 MAX_ATTEMPTS = 3
 HOST = "127.0.0.1"
 PORT = 5005
+
+# ---- 音色清单缓存（edge_tts.list_voices 走微软接口，网络请求，缓存 24h）----
+_VOICES_CACHE = None
+_VOICES_CACHE_TIME = 0.0
+VOICES_CACHE_TTL = 24 * 60 * 60  # 24 小时
+
+
+async def fetch_voices() -> list[dict]:
+    raw = await edge_tts.list_voices()
+    out = []
+    for v in raw or []:
+        short_name = v.get("ShortName")
+        if not short_name:
+            continue
+        out.append(
+            {
+                "shortName": short_name,
+                "friendlyName": v.get("FriendlyName") or short_name,
+                "gender": v.get("Gender"),
+                "locale": v.get("Locale") or "",
+                "status": v.get("Status"),
+            }
+        )
+    return out
+
+
+@app.route("/voices", methods=["GET"])
+def voices():
+    global _VOICES_CACHE, _VOICES_CACHE_TIME
+    now = time.time()
+    if _VOICES_CACHE is None or (now - _VOICES_CACHE_TIME) > VOICES_CACHE_TTL:
+        try:
+            fetched = asyncio.run(fetch_voices())
+            if not fetched:
+                raise RuntimeError("edge_tts.list_voices 返回空")
+            _VOICES_CACHE = fetched
+            _VOICES_CACHE_TIME = now
+            logger.info(
+                "刷新音色清单: %d voices / %d locales",
+                len(fetched),
+                len({v["locale"] for v in fetched}),
+            )
+        except Exception as e:
+            logger.error("获取音色清单失败: %s: %s", type(e).__name__, e)
+            if _VOICES_CACHE is None:
+                return jsonify({"error": "%s: %s" % (type(e).__name__, e)}), 502
+            # 拉取失败但有旧缓存，继续返回旧缓存
+    return jsonify(
+        {
+            "voices": _VOICES_CACHE,
+            "updatedAt": int(_VOICES_CACHE_TIME * 1000),
+        }
+    )
 
 
 async def synthesize(text: str, voice: str, rate: Optional[str] = None) -> bytes:

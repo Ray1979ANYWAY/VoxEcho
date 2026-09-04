@@ -44,6 +44,11 @@ const DEFAULT_STATE = {
   emptyPageStreak: 0, // 连续遇到"这一页提取不到任何文字"的页数——用来给自动翻页设一个上限，避免图片书无限翻下去
   pageTurnRetryCount: 0, // 当前这次翻页等待超时后已经重试了几次——网络慢导致翻页耗时长，
   // 不代表真的翻到全书最后一页了，先重试几次再判定异常，见 triggerPageTurnAndWait
+  // 空页自动翻页的"书尾判断"：翻页后页面内容有没有变化。连续插画页（内容不同但
+  // 都无文本）不应误停，只有翻到书尾（翻页后内容不再变）才停止。
+  emptyLastFingerprint: null, // 上次空页翻页时的页面指纹
+  emptyPageStallCount: 0, // 连续"翻页后页面内容无变化"的次数
+  emptyLastTurnAt: 0, // 上次空页翻页的时间戳（节流用）
   connectionStatus: "idle", // idle | ok | error —— 供 popup 信号灯显示
   // 用户点"开始朗读"时，按视口内第一个标点裁掉页首半句；只用一次，算完 chunks 后清掉
   startTrim: null, // { skipPrefix: string } | null
@@ -242,6 +247,12 @@ let pageTurnTimeoutHandle = null;
 // 连续遇到"这一页提取不到任何文字"的页数上限——超过这个数就放弃自动翻页、停止朗读
 // （大概率是纯图片/封面区段，或者书已经读完了）。只要有一页提取到真内容就清零重新计数。
 const MAX_EMPTY_PAGE_STREAK = 5;
+// 空页翻页的书尾判断（取代"连续 N 次空页就停"）：连续 N 次"翻页后页面内容无变化"
+// 才认为到书尾。书中间可能连续很多页插画（内容不同但都无文本），不该误停；
+// 只有滚动/翻到底、内容不再变化才是真正的终点。
+const MAX_EMPTY_STALL = 4;
+// 两次空页翻页的最小间隔：给 Play Books 翻页动画/渲染留时间，避免疯狂连翻
+const EMPTY_TURN_INTERVAL_MS = 1200;
 
 function clearPageTurnTimeout() {
   if (pageTurnTimeoutHandle) {
@@ -449,12 +460,20 @@ async function startReading(tabId, voice, rate) {
     pageTurnRetryCount: 0,
     startTrim: null,
   });
+  // 通知 content 停掉旧的空页周期上报，新朗读从当前页重新检测空页状态
+  chrome.tabs.sendMessage(tabId, { type: "PB_START_READING" }).catch(() => {});
   return { ok: true };
 }
 
 async function stopReading() {
   clearPageTurnTimeout();
   clearPlaybackWatchdog();
+  const prev = await getReadingState();
+  if (prev.tabId) {
+    // 通知 content 停止空页周期上报：防止残留实例的旧页面空页上报在下次
+    // 开始朗读时被误当成"当前页是空页"处理而误翻页（对齐 Koodo 的同类修复）。
+    chrome.tabs.sendMessage(prev.tabId, { type: "PB_STOP_READING" }).catch(() => {});
+  }
   await setReadingState({ ...DEFAULT_STATE });
   chrome.runtime.sendMessage({ type: "OFFSCREEN_STOP" }).catch(() => {
     // offscreen 本来就不存在（比如陈旧状态被纠正、或者从没成功创建过），没什么好停的，忽略
@@ -548,24 +567,47 @@ export function handlePlaybooksMessage(message, sender, sendResponse) {
         (async () => {
           const state = await getReadingState();
           if (!state.isReading || state.isPaused || state.tabId !== tabId) return;
-          // 已经在等一次翻页的结果了（说明刚触发过 TURN_PAGE），这次的"空"上报
-          // 很可能只是翻页动画中间态、DOM 还没渲染完导致暂时抓不到文字，不是真的空页。
-          // 如果这里不做判断就再触发一次 triggerPageTurnAndWait，会变成"又翻了一页"，
-          // 把本该等到的内容跳过去了。真正长时间等不到内容的情况，triggerPageTurnAndWait
-          // 里已经有超时兜底会自动停止朗读，不会因为这里不重复触发而卡死。
+          const fp = message.fingerprint || null;
+          const last = state.emptyLastFingerprint || null;
+          const sameContent =
+            last &&
+            fp &&
+            fp.textLen === last.textLen &&
+            fp.imgCount === last.imgCount &&
+            JSON.stringify(fp.imgSrcs || []) === JSON.stringify(last.imgSrcs || []);
+
+          // 已经在等一次翻页的结果了：若这次空页指纹与翻页前完全相同 → 动画中间态
+          // （旧页还短暂留在 DOM / 翻页无效内容没变），忽略，交给 triggerPageTurnAndWait
+          // 的超时兜底；若指纹变了 → 翻页其实成功了、只是新页也是空页（连续插图区段），
+          // 清除 waiting 标记继续走空页流程，不能因为"还在等翻页"而错过继续翻页。
           if (state.waitingForNextPage) {
-            logEvent("background", "空页上报被忽略：已经在等翻页结果，很可能是动画中间态");
-            return;
+            if (sameContent) {
+              logEvent("background", "空页上报被忽略：内容未变（动画中间态或翻页无效）");
+              return;
+            }
+            logEvent("background", "翻页成功但新页也是空页（内容已变），清除 waiting 继续空页流程");
+            await setReadingState({ waitingForNextPage: false, pageTurnRetryCount: 0 });
           }
-          const streak = (state.emptyPageStreak || 0) + 1;
-          if (streak > MAX_EMPTY_PAGE_STREAK) {
-            // 连续好几页都是空的（大概率纯图片区段，或者书读完了），别再无限翻下去了
-            logEvent("background", `连续 ${streak} 次空页，超过上限，停止朗读`);
+
+          // 节流：给 Play Books 翻页动画/渲染留时间
+          const now = Date.now();
+          if (now - (state.emptyLastTurnAt || 0) < EMPTY_TURN_INTERVAL_MS) return;
+
+          // 书尾判断：翻页后内容无变化 → 停滞计数 +1；内容变了（新插画页/新章节）→ 归零
+          const stall = sameContent ? (state.emptyPageStallCount || 0) + 1 : 0;
+          await setReadingState({
+            emptyPageStallCount: stall,
+            emptyLastFingerprint: fp,
+            emptyLastTurnAt: now,
+          });
+          logEvent("background", `空页 ${sameContent ? "无变化" : "有变化"}，停滞计数 ${stall}/${MAX_EMPTY_STALL}`, {
+            fingerprint: fp,
+          });
+          if (stall >= MAX_EMPTY_STALL) {
+            logEvent("background", "连续多次翻页内容无变化，判断已到书尾，停止朗读");
             await stopReading();
             return;
           }
-          logEvent("background", `真空页，触发翻页 (streak=${streak})`);
-          await setReadingState({ emptyPageStreak: streak });
           clearPageTurnTimeout();
           await triggerPageTurnAndWait(tabId);
         })();

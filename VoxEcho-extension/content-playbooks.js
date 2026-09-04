@@ -345,26 +345,73 @@
     return { skipPrefix };
   }
 
+  // ---- 空页（纯图片/空白页）检测与自动翻页上报 ----
+  // 与 Koodo 同理：这一页提取不到任何 <p>/<h> 文本（封面、插图页、空白页）时，
+  // 周期性上报"空页 + 页面指纹"，让 background 判断"翻页后内容有没有变化"——
+  // 连续插画页（内容不同但都无文本）不应误停，只有翻到书尾（翻页后内容不再变）
+  // 才停止朗读。不能用"连续 N 次空页"判断（书中间可能连续很多页插画）。
+  let emptyPageTimer = null;
+
+  function getEmptyPageFingerprint() {
+    const text = (document.body ? document.body.textContent : "").replace(/\s+/g, " ").trim();
+    const imgs = document.querySelectorAll("img");
+    const imgSrcs = [];
+    for (const img of imgs) {
+      imgSrcs.push(img.getAttribute("src") || img.getAttribute("data-src") || img.getAttribute("alt") || "");
+    }
+    return {
+      textLen: text.length,
+      textHead: text.slice(0, 40),
+      imgCount: imgs.length,
+      imgSrcs: imgSrcs.slice(0, 5),
+    };
+  }
+
+  function stopEmptyPageReport() {
+    if (emptyPageTimer) {
+      clearInterval(emptyPageTimer);
+      emptyPageTimer = null;
+    }
+  }
+
+  function scheduleEmptyPageReport() {
+    if (emptyPageTimer) return;
+    const fire = () => {
+      if (!window.__hasEverMatched) {
+        stopEmptyPageReport();
+        return;
+      }
+      if (extractCurrentPageText()) {
+        // 翻页/滚动到正文了，停止空页上报
+        stopEmptyPageReport();
+        return;
+      }
+      const fp = getEmptyPageFingerprint();
+      diagLog("空页周期上报（无正文，触发朗读中自动翻页）", fp);
+      safeSendMessage({
+        type: "PAGE_TEXT_UPDATED",
+        url: location.href,
+        data: null,
+        fingerprint: fp,
+      });
+    };
+    fire();
+    emptyPageTimer = setInterval(fire, 1000);
+  }
+
   function reportIfChanged() {
     const data = extractCurrentPageText();
 
     if (!data) {
       // 顶层 play.google.com 页面本来就永远匹配不到正文，不应该发送任何消息（避免用无意义的
       // "没有正文"覆盖掉真正的正文 iframe 发来的数据）。
-      // 只有"这个 frame 之前确实成功提取过、现在突然匹配不到了"才主动上报清空——
-      // 常见场景：同一个 iframe 内用 SPA 方式切换到了另一本书，选择器对不上新书的 class 结构。
-      if (window.__hasEverMatched && window.__lastReportedText !== null) {
-        diagLog("提取结果为空，且之前匹配过，上报 null");
-        window.__lastReportedText = null;
-        safeSendMessage({
-          type: "PAGE_TEXT_UPDATED",
-          url: location.href,
-          data: null,
-        });
-      }
+      // 只有"这个 frame 之前确实成功提取过、现在突然匹配不到了"才主动上报空页——
+      // 常见场景：封面/插图/空白页，或同一个 iframe 内用 SPA 方式切换到了另一本书。
+      // 空页走周期上报（带指纹），让 background 判断翻页后内容有无变化，而不是只报一次。
+      if (window.__hasEverMatched) scheduleEmptyPageReport();
       return;
     }
-
+    stopEmptyPageReport();
     window.__hasEverMatched = true;
 
     const serialized = JSON.stringify(data);
@@ -467,6 +514,20 @@
   // 也尽量高亮到位，而不是直接放弃整段不高亮。
   const MIN_MATCH_LEN = 6; // 最短还能接受的匹配长度，太短容易在页面里误中别的位置
 
+  // 高亮锚点（方案A：单向推进）：记录上次 chunk 在页面文本里的结束位置，下次从它
+  // 之后开始搜——防止"全文 indexOf 命中前面重复处"导致高亮跳回。Play Books 翻页后
+  // 当前页文本会整体变化，这里用"页面文本（normalizedCombined）"做指纹——同一页内
+  // 页面文本保持不变（chunk 在变但页面没变），指纹稳定，锚点得以单向推进；翻页后
+  // 页面文本整体替换，指纹变化，锚点自动重置（否则旧锚点会让新页找不到文本）。
+  let lastEndChar = -1;
+  let lastPageFingerprint = null;
+
+  function fingerprintForText(t) {
+    // 页面文本的首尾各 24 字符 + 长度，足以区分相邻页；同页内该值稳定。
+    const s = t.replace(/\s+/g, " ").trim();
+    return s.length + ":" + s.slice(0, 24) + "|" + s.slice(-24);
+  }
+
   // 返回一组 Range，而不是单个跨节点的大 Range：surroundContents 只能处理
   // "起点和终点落在同一个父节点结构内"的范围，一旦这段文字跨越了段落边界
   // （比如从一个 <p> 延伸到下一个 <p>，中间隔着分页符），构造一个横跨它们的
@@ -510,12 +571,22 @@
     // 匹配策略（按优先级）：
     // 1) 整段  2) 从前往后缩短前缀  3) 从后往前缩短后缀（跨页时页首只有后半句）
     // 找到后只高亮「当前页 DOM 里实际存在」的那一段，不再按 fullText.length 盲取。
-    function tryFind(str) {
+    // fromIndex：方案A单向推进——从上次 chunk 结束位置之后开始搜，防止命中前面重复处。
+    function tryFind(str, fromIndex) {
       if (str.length < MIN_MATCH_LEN) return -1;
-      return normalizedCombined.indexOf(str);
+      return normalizedCombined.indexOf(str, fromIndex || 0);
     }
 
-    let idx = tryFind(fullText);
+    // 翻页检测：基于"页面文本 normalizedCombined"做指纹。同一页内页面文本稳定，
+    // 指纹不变 → 锚点继续单向推进；翻页后页面文本整体替换，指纹变化 → 重置锚点。
+    const pageFp = fingerprintForText(normalizedCombined);
+    if (pageFp !== lastPageFingerprint) {
+      lastPageFingerprint = pageFp;
+      lastEndChar = -1;
+    }
+    const from = Math.max(0, lastEndChar);
+
+    let idx = tryFind(fullText, from);
     let matched = fullText;
 
     if (idx === -1) {
@@ -523,7 +594,7 @@
       while (matchLen >= MIN_MATCH_LEN) {
         matchLen = Math.floor(matchLen * 0.85);
         const prefix = fullText.slice(0, matchLen);
-        idx = tryFind(prefix);
+        idx = tryFind(prefix, from);
         if (idx !== -1) {
           matched = prefix;
           break;
@@ -536,11 +607,21 @@
       while (matchLen >= MIN_MATCH_LEN) {
         matchLen = Math.floor(matchLen * 0.85);
         const suffix = fullText.slice(fullText.length - matchLen);
-        idx = tryFind(suffix);
+        idx = tryFind(suffix, from);
         if (idx !== -1) {
           matched = suffix;
           break;
         }
+      }
+    }
+
+    // 自愈兜底：单向推进失败时，锚点可能已被污染（比如旧页面残留的 lastEndChar），
+    // 回退到全文 from=0 再完整匹配一次；命中后用正确位置重置锚点。
+    if (idx === -1 && lastEndChar > 0) {
+      const retryIdx = normalizedCombined.indexOf(fullText);
+      if (retryIdx !== -1) {
+        idx = retryIdx;
+        matched = fullText;
       }
     }
 
@@ -580,6 +661,11 @@
     let rangeStart = null;
     let prev = null;
     const end = Math.min(idx + coverLen, normMap.length);
+    // 更新锚点：本 chunk 在页面文本里的结束位置，供下一次单向推进。
+    // 注意：这里先记录 idx 起始位置，若最终没生成任何 Range（匹配串都是空白之类
+    // 的极端情况）则不该推进锚点——所以 anchor 更新放在返回前的条件判断里。
+    const anchorFrom = idx;
+    const anchorTo = end;
     for (let i = idx; i < end; i++) {
       const m = normMap[i];
       if (m._space && m.ch === " ") {
@@ -621,6 +707,8 @@
         if (r.toString().trim().length > 0) ranges.push(r);
       } catch (e) {}
     }
+    // 有实际高亮范围才推进锚点；空匹配不推进（防止锚点被空白串污染）
+    if (ranges.length > 0) lastEndChar = anchorTo;
     return ranges;
   }
 
@@ -672,12 +760,16 @@
       lastHighlightText = text || null;
       if (!text) {
         clearHighlight();
+        // 停止/清空：重置高亮锚点，下次重新朗读从头搜（避免旧锚点污染新 session）
+        lastEndChar = -1;
+        lastPageFingerprint = null;
+        diagLog("高亮清空：重置锚点");
         return;
       }
 
       // CSS Highlight 不改 DOM；仍 disconnect 以兼容 mark 回退路径
       if (!applyHighlightRanges(text)) {
-        diagLog("高亮未命中，安排延迟重试", { preview: text.slice(0, 20) });
+        diagLog("高亮未命中，安排延迟重试", { preview: text.slice(0, 20), lastEndChar });
         [300, 700, 1200, 2000, 3000].forEach((ms) => {
           const t = setTimeout(() => {
             if (lastHighlightText !== text) return;
@@ -754,6 +846,13 @@
       });
       sendResponse(result);
       return true;
+    }
+    if (message.type === "PB_START_READING" || message.type === "PB_STOP_READING") {
+      // 朗读停止/重新开始时停掉空页周期上报：emptyPageTimer 只在提取到正文时
+      // 自己停，朗读停止后残留实例会继续上报旧页面指纹，在下一次朗读开始时被
+      // background 误判为"当前页是空页"而误翻页。background 在 stop/start 时
+      // 都会广播一条，所有 content 实例（含旧实例）都停。
+      stopEmptyPageReport();
     }
     if (message.type === "TURN_PAGE") {
       const now = Date.now();

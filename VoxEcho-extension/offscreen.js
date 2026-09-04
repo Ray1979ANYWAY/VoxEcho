@@ -24,10 +24,14 @@ let playStartedAt = 0;
 
 const PREFETCH_WINDOW = 5;
 /** 单块合成失败后，在停播前再试几次（桥接本身也有重试，这里防短暂断线/超时） */
-const CHUNK_FETCH_RETRIES = 3;
-const CHUNK_RETRY_DELAY_MS = 1200;
+const CHUNK_FETCH_RETRIES = 4;
+const CHUNK_RETRY_DELAY_MS = 1500;
 /** 连续失败超过这个数才真正停；中间成功会清零 */
-const MAX_CONSECUTIVE_FAILURES = 3;
+const MAX_CONSECUTIVE_FAILURES = 5;
+/** 单次合成请求的超时：本地桥 /speak 会等远程 TTS 返回，网络慢时可能长时间无响应。
+ *  不加超时的话 fetch 会永久挂起（既不成功也不失败），朗读卡在等待；加了超时后
+ *  超时按失败处理、进入重试，网络恢复后能接上，而不是一直干等。 */
+const FETCH_TIMEOUT_MS = 30000;
 let consecutiveFailures = 0;
 
 function abortAllPending() {
@@ -38,18 +42,28 @@ function abortAllPending() {
 function fetchChunk(text, voice) {
   const controller = new AbortController();
   activeAbortControllers.push(controller);
+  // 超时用 abort(reason) 传一个普通 Error：这样 fetch reject 的是这个 Error 而不是
+  // AbortError，fetchChunkWithRetry 会把它当成普通失败走重试；如果直接 abort() 无参
+  // 数，fetch reject 成 AbortError，会被当作"主动取消"直接放弃，不重试。
+  const timeout = setTimeout(() => controller.abort(new Error("synthesize timeout")), FETCH_TIMEOUT_MS);
   return fetch("http://127.0.0.1:5005/speak", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, voice }),
     signal: controller.signal,
-  }).then(async (resp) => {
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP ${resp.status}`);
-    }
-    return resp.blob();
-  });
+  })
+    .then(async (resp) => {
+      clearTimeout(timeout);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${resp.status}`);
+      }
+      return resp.blob();
+    })
+    .catch((e) => {
+      clearTimeout(timeout);
+      throw e;
+    });
 }
 
 /** 带重试的合成；全部失败才返回 { __error } */
@@ -337,6 +351,11 @@ function seekBy(delta) {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === "OFFSCREEN_PLAY") {
+    // 重开朗读前先走一遍 stopPlayback：它除了清空内部状态，还会发一条
+    // HIGHLIGHT_CHUNK(text:null) 通知 content 侧重置高亮锚点（lastEndChar）。
+    // 否则重开时 content 侧的锚点还停留在上一次朗读的结束位置，导致新 session
+    // 的 chunk[0]（位于全文靠前处）永远匹配不到 → 高亮未命中。
+    stopPlayback();
     playChunkList(message.chunks, message.voice, message.rate);
   } else if (message.type === "OFFSCREEN_RETRY") {
     retryCurrentChunk();

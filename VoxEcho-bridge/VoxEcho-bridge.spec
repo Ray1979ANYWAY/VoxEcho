@@ -5,7 +5,7 @@ a = Analysis(
     ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[('VoxEcho.ico', '.'), ('server.py', '.')],
+    datas=[('server.py', '.')],
     hiddenimports=['edge_tts', 'flask', 'flask_cors', 'pystray', 'PIL'],
     hookspath=[],
     hooksconfig={},

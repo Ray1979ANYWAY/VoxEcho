@@ -36,6 +36,10 @@ const I18N = {
     exported: (n) => `已导出 ${n} 条日志`,
     logCleared: "日志已清空",
     sponsor: "如果你觉得 VoxEcho 对你有帮助，欢迎请我喝杯咖啡！",
+    bridgeDown:
+      "无法连接本地 VoxEcho bridge，音色列表可能不是最新。请先开启 VoxEcho bridge 程序。",
+    genderFemale: "女",
+    genderMale: "男",
     // 音色分组 / 音色选项
     gZh: "中文", gEn: "英语", gEs: "西班牙语", gJa: "日语", gKo: "韩语",
     vZhXiaoxiao: "中文女声 Xiaoxiao（大陆）",
@@ -89,6 +93,10 @@ const I18N = {
     exported: (n) => `已匯出 ${n} 條日誌`,
     logCleared: "日誌已清空",
     sponsor: "如果你覺得 VoxEcho 對你有幫助，歡迎請我喝杯咖啡！",
+    bridgeDown:
+      "無法連線本機 VoxEcho bridge，音色清單可能不是最新。請先開啟 VoxEcho bridge 程式。",
+    genderFemale: "女",
+    genderMale: "男",
     // 音色分組 / 音色選項
     gZh: "中文", gEn: "英語", gEs: "西班牙語", gJa: "日語", gKo: "韓語",
     vZhXiaoxiao: "中文女聲 Xiaoxiao（中國大陸）",
@@ -142,6 +150,10 @@ const I18N = {
     exported: (n) => `Exported ${n} log entries`,
     logCleared: "Log cleared",
     sponsor: "If you find VoxEcho helpful, consider buying me a coffee!",
+    bridgeDown:
+      "Can't reach the local VoxEcho bridge; the voice list may be stale. Please start the VoxEcho bridge app first.",
+    genderFemale: "Female",
+    genderMale: "Male",
     // Voice groups / voice options
     gZh: "Chinese", gEn: "English", gEs: "Spanish", gJa: "Japanese", gKo: "Korean",
     vZhXiaoxiao: "Chinese Female Xiaoxiao (Mainland China)",
@@ -195,6 +207,10 @@ const I18N = {
     exported: (n) => `Se exportaron ${n} entradas de registro`,
     logCleared: "Registro borrado",
     sponsor: "Si VoxEcho te resulta útil, ¡invítame un café!",
+    bridgeDown:
+      "No se puede conectar con el puente local de VoxEcho; la lista de voces puede estar desactualizada. Inicia primero la aplicación VoxEcho bridge.",
+    genderFemale: "Femenina",
+    genderMale: "Masculino",
     // Voz: grupos / opciones
     gZh: "Chino", gEn: "Inglés", gEs: "Español", gJa: "Japonés", gKo: "Coreano",
     vZhXiaoxiao: "Voz femenina china Xiaoxiao (China continental)",
@@ -248,6 +264,10 @@ const I18N = {
     exported: (n) => `${n} 件のログをエクスポートしました`,
     logCleared: "ログをクリアしました",
     sponsor: "VoxEcho が役に立ったら、コーヒーをごちそうしてください！",
+    bridgeDown:
+      "ローカルの VoxEcho ブリッジに接続できません。音声リストが最新でない可能性があります。VoxEcho ブリッジを起動してください。",
+    genderFemale: "女性",
+    genderMale: "男性",
     // 音声：グループ / オプション
     gZh: "中国語", gEn: "英語", gEs: "スペイン語", gJa: "日本語", gKo: "韓国語",
     vZhXiaoxiao: "中国語（女性）Xiaoxiao（中国本土）",
@@ -301,6 +321,10 @@ const I18N = {
     exported: (n) => `로그 ${n}개를 내보냈습니다`,
     logCleared: "로그를 지웠습니다",
     sponsor: "VoxEcho가 도움이 되셨다면 커피 한 잔 사주시면 감사하겠습니다!",
+    bridgeDown:
+      "로컬 VoxEcho 브리지에 연결할 수 없어 음성 목록이 최신이 아닐 수 있습니다. VoxEcho 브리지를 먼저 실행해 주세요.",
+    genderFemale: "여성",
+    genderMale: "남성",
     // 음성: 그룹 / 옵션
     gZh: "중국어", gEn: "영어", gEs: "스페인어", gJa: "일본어", gKo: "한국어",
     vZhXiaoxiao: "중국어 여성 Xiaoxiao (중국 본토)",
@@ -360,64 +384,248 @@ const VOICE_GROUPS = [
   {
     labelKey: "gZh",
     options: [
-      { value: "zh-CN-XiaoxiaoNeural", labelKey: "vZhXiaoxiao" },
-      { value: "zh-TW-HsiaoChenNeural", labelKey: "vZhHsiaoChen" },
-      { value: "zh-CN-YunyangNeural", labelKey: "vZhYunyang" },
-      { value: "zh-CN-YunjianNeural", labelKey: "vZhYunjian" },
-      { value: "zh-HK-HiuMaanNeural", labelKey: "vZhHiuMaan" },
-      { value: "zh-HK-WanLungNeural", labelKey: "vZhWanLung" },
+      { value: "zh-CN-XiaoxiaoNeural", labelKey: "vZhXiaoxiao", gender: "Female" },
+      { value: "zh-TW-HsiaoChenNeural", labelKey: "vZhHsiaoChen", gender: "Female" },
+      { value: "zh-CN-YunyangNeural", labelKey: "vZhYunyang", gender: "Male" },
+      { value: "zh-CN-YunjianNeural", labelKey: "vZhYunjian", gender: "Male" },
+      { value: "zh-HK-HiuMaanNeural", labelKey: "vZhHiuMaan", gender: "Female" },
+      { value: "zh-HK-WanLungNeural", labelKey: "vZhWanLung", gender: "Male" },
     ],
   },
   {
     labelKey: "gEn",
     options: [
-      { value: "en-US-AriaNeural", labelKey: "vEnAria" },
-      { value: "en-US-MichelleNeural", labelKey: "vEnMichelle" },
-      { value: "en-GB-SoniaNeural", labelKey: "vEnSonia" },
-      { value: "en-US-GuyNeural", labelKey: "vEnGuy" },
-      { value: "en-US-AndrewNeural", labelKey: "vEnAndrew" },
-      { value: "en-GB-RyanNeural", labelKey: "vEnRyan" },
+      { value: "en-US-AriaNeural", labelKey: "vEnAria", gender: "Female" },
+      { value: "en-US-MichelleNeural", labelKey: "vEnMichelle", gender: "Female" },
+      { value: "en-GB-SoniaNeural", labelKey: "vEnSonia", gender: "Female" },
+      { value: "en-US-GuyNeural", labelKey: "vEnGuy", gender: "Male" },
+      { value: "en-US-AndrewNeural", labelKey: "vEnAndrew", gender: "Male" },
+      { value: "en-GB-RyanNeural", labelKey: "vEnRyan", gender: "Male" },
     ],
   },
   {
     labelKey: "gEs",
     options: [
-      { value: "es-MX-DaliaNeural", labelKey: "vEsDalia" },
-      { value: "es-ES-ElviraNeural", labelKey: "vEsElvira" },
-      { value: "es-MX-JorgeNeural", labelKey: "vEsJorge" },
-      { value: "es-ES-AlvaroNeural", labelKey: "vEsAlvaro" },
+      { value: "es-MX-DaliaNeural", labelKey: "vEsDalia", gender: "Female" },
+      { value: "es-ES-ElviraNeural", labelKey: "vEsElvira", gender: "Female" },
+      { value: "es-MX-JorgeNeural", labelKey: "vEsJorge", gender: "Male" },
+      { value: "es-ES-AlvaroNeural", labelKey: "vEsAlvaro", gender: "Male" },
     ],
   },
   {
     labelKey: "gJa",
     options: [
-      { value: "ja-JP-NanamiNeural", labelKey: "vJaNanami" },
-      { value: "ja-JP-KeitaNeural", labelKey: "vJaKeita" },
+      { value: "ja-JP-NanamiNeural", labelKey: "vJaNanami", gender: "Female" },
+      { value: "ja-JP-KeitaNeural", labelKey: "vJaKeita", gender: "Male" },
     ],
   },
   {
     labelKey: "gKo",
     options: [
-      { value: "ko-KR-SunHiNeural", labelKey: "vKoSunHi" },
-      { value: "ko-KR-InJoonNeural", labelKey: "vKoInJoon" },
+      { value: "ko-KR-SunHiNeural", labelKey: "vKoSunHi", gender: "Female" },
+      { value: "ko-KR-InJoonNeural", labelKey: "vKoInJoon", gender: "Male" },
     ],
   },
 ];
 
-function buildVoiceOptions() {
-  const select = document.getElementById("voice");
-  select.innerHTML = "";
-  VOICE_GROUPS.forEach((group) => {
-    const og = document.createElement("optgroup");
-    og.label = t(group.labelKey);
-    group.options.forEach((opt) => {
-      const option = document.createElement("option");
-      option.value = opt.value;
-      option.textContent = t(opt.labelKey);
-      og.appendChild(option);
-    });
-    select.appendChild(og);
-  });
+// ---- 音色清单：实时从本地 bridge 拉取 Edge TTS 最新音色，失败时回退缓存 / 内置兜底 ----
+const BRIDGE_URL = "http://127.0.0.1:5005";
+const VOICES_CACHE_KEY = "voxechoVoicesCache";
+
+// 浏览器系统语言（小写连字符形式），用于语言下拉的默认选中
+let BROWSER_LANG = "";
+try {
+  BROWSER_LANG = String(chrome.i18n.getUILanguage() || navigator.language || "")
+    .replace("_", "-")
+    .toLowerCase();
+} catch (e) {
+  BROWSER_LANG = String(navigator.language || "").replace("_", "-").toLowerCase();
+}
+
+let currentVoices = [];
+let langGroups = []; // [{ key, label, pinned, voices: [] }]
+let voicesOnline = false; // 音色清单是否来自实时 bridge（false = 缓存/兜底）
+
+// 六个 UI 语言永远排在语言下拉最前面；浏览器语言命中的那一项置顶
+const PINNED_LANGS = [
+  { key: "zh-Hans", match: (bl) => bl === "zh" || bl.startsWith("zh-cn") || bl.startsWith("zh-sg") || bl.startsWith("zh-my") },
+  { key: "zh-Hant", match: (bl) => bl.startsWith("zh-tw") || bl.startsWith("zh-hk") || bl.startsWith("zh-mo") },
+  { key: "en", match: (bl) => bl.startsWith("en") },
+  { key: "es", match: (bl) => bl.startsWith("es") },
+  { key: "ja", match: (bl) => bl.startsWith("ja") },
+  { key: "ko", match: (bl) => bl.startsWith("ko") },
+];
+
+// 音色显示名：保留国家/地区后缀并带上性别前缀。例：en-GB-SoniaNeural(Female) → "Female · Sonia (en-GB)"、es-MX-DaliaNeural(Female) → "Femenina · Dalia (es-MX)"
+function voiceDisplayName(v) {
+  const s = v.shortName || "";
+  const m = s.match(/^([a-z]{2,3}(?:-[A-Za-z]{2})?)-(.*)$/);
+  if (!m) return s;
+  const locale = m[1];
+  let name = m[2].replace(
+    /(MultilingualNeural|NeuralMultilingual|Neural|Online|Turbo|HD|Gaming|Pro)$/i,
+    ""
+  );
+  const g = String(v.gender || "").toLowerCase();
+  const genderWord = g === "female" ? t("genderFemale") : g === "male" ? t("genderMale") : "";
+  const base = name ? `${name} (${locale})` : s;
+  return genderWord ? `${genderWord} · ${base}` : base;
+}
+
+// 语言分组键：中文按简/繁细分（简体=zh-CN/SG 等，繁体=zh-TW/HK/MO），其余按主语言
+function langKeyOfVoice(v) {
+  const parts = (v.locale || "").split("-");
+  const primary = (parts[0] || "").toLowerCase();
+  if (primary === "zh") {
+    const region = (parts[1] || "").toUpperCase();
+    if (region === "TW" || region === "HK" || region === "MO") return "zh-Hant";
+    return "zh-Hans";
+  }
+  return primary;
+}
+
+function langLabel(key) {
+  try {
+    return new Intl.DisplayNames([UI_LOCALE || "en"], { type: "language" }).of(key) || key;
+  } catch (e) {
+    return key;
+  }
+}
+
+function buildLangGroups() {
+  const map = new Map();
+  for (const v of currentVoices) {
+    const key = langKeyOfVoice(v);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(v);
+  }
+  const groups = [];
+  const pinned = PINNED_LANGS.filter((g) => map.has(g.key));
+  const matched = pinned.find((g) => g.match(BROWSER_LANG));
+  let pinnedOrdered;
+  if (matched) {
+    // 浏览器语言命中的置顶
+    pinnedOrdered = [matched, ...pinned.filter((g) => g !== matched)];
+  } else {
+    // 未命中时英文放最前（兜底语言）
+    const en = pinned.find((g) => g.key === "en");
+    pinnedOrdered = en ? [en, ...pinned.filter((g) => g !== en)] : pinned;
+  }
+  for (const g of pinnedOrdered) {
+    groups.push({ key: g.key, label: langLabel(g.key), pinned: true, voices: map.get(g.key) });
+  }
+  const collator = new Intl.Collator(UI_LOCALE || "en");
+  const others = [...map.keys()].filter((k) => !pinned.some((p) => p.key === k));
+  others.sort((a, b) => collator.compare(langLabel(a), langLabel(b)));
+  for (const k of others) {
+    groups.push({ key: k, label: langLabel(k), pinned: false, voices: map.get(k) });
+  }
+  langGroups = groups;
+}
+
+function fillLangSelect() {
+  const sel = document.getElementById("lang");
+  sel.innerHTML = "";
+  for (const g of langGroups) {
+    const opt = document.createElement("option");
+    opt.value = g.key;
+    // 每次按当前 UI_LOCALE 现算标签，保证切换界面语言后语言名随之本地化
+    opt.textContent = langLabel(g.key);
+    sel.appendChild(opt);
+  }
+}
+
+function fillVoiceSelect() {
+  const langSel = document.getElementById("lang");
+  const sel = document.getElementById("voice");
+  const key = langSel.value;
+  const group = langGroups.find((g) => g.key === key);
+  sel.innerHTML = "";
+  if (!group) return;
+  for (const v of group.voices) {
+    const opt = document.createElement("option");
+    opt.value = v.shortName;
+    opt.textContent = voiceDisplayName(v);
+    sel.appendChild(opt);
+  }
+}
+
+// 默认语言：浏览器语言命中则选中它；未命中用英语兜底
+function applyDefaultLang() {
+  const sel = document.getElementById("lang");
+  const primary = BROWSER_LANG.split("-")[0];
+  let matched = null;
+  for (const g of langGroups) {
+    if (g.pinned) {
+      const spec = PINNED_LANGS.find((p) => p.key === g.key);
+      if (spec && spec.match(BROWSER_LANG)) {
+        matched = g.key;
+        break;
+      }
+    } else if (g.key === primary) {
+      matched = g.key;
+      break;
+    }
+  }
+  if (!matched) {
+    const en = langGroups.find((g) => g.key === "en");
+    matched = en ? en.key : langGroups[0] ? langGroups[0].key : null;
+  }
+  if (matched) sel.value = matched;
+}
+
+function updateBridgeNotice(ok) {
+  const el = document.getElementById("bridgeNotice");
+  if (!el) return;
+  if (ok) {
+    el.hidden = true;
+  } else {
+    el.hidden = false;
+    el.textContent = t("bridgeDown");
+  }
+}
+
+// 内置兜底：bridge 离线且没有缓存时，退回原来的 20 个音色
+function fallbackVoices() {
+  const out = [];
+  for (const g of VOICE_GROUPS) {
+    for (const opt of g.options) {
+      const parts = opt.value.split("-");
+      const locale = parts.length >= 2 ? parts.slice(0, 2).join("-") : parts[0];
+      out.push({ shortName: opt.value, locale, friendlyName: opt.value, gender: opt.gender || "", status: "" });
+    }
+  }
+  return out;
+}
+
+async function loadVoices() {
+  let ok = false;
+  try {
+    const res = await fetch(BRIDGE_URL + "/voices", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data.voices) || data.voices.length === 0) throw new Error("empty voices");
+    currentVoices = data.voices;
+    chrome.storage.local.set({ [VOICES_CACHE_KEY]: { ts: Date.now(), voices: currentVoices } });
+    ok = true;  } catch (e) {
+    const cached = await chrome.storage.local.get(VOICES_CACHE_KEY);
+    if (
+      cached[VOICES_CACHE_KEY] &&
+      Array.isArray(cached[VOICES_CACHE_KEY].voices) &&
+      cached[VOICES_CACHE_KEY].voices.length > 0
+    ) {
+      currentVoices = cached[VOICES_CACHE_KEY].voices;
+    } else {
+      currentVoices = fallbackVoices();
+    }
+  }
+  buildLangGroups();
+  fillLangSelect();
+  applyDefaultLang();
+  fillVoiceSelect();
+  voicesOnline = ok;
+  updateBridgeNotice(ok);
+  return ok;
 }
 
 // 把界面整体切成当前语言：语言标记、标题、静态文案、状态灯提示、新增的朗读起点注释、音色选项。
@@ -435,7 +643,24 @@ function applyUiLanguage() {
   // 避免轮询响应到达前短暂闪现英文默认文案
   const pauseResumeBtn = document.getElementById("pauseResume");
   if (pauseResumeBtn) pauseResumeBtn.textContent = s.pause;
-  buildVoiceOptions();
+  // 音色列表已加载的话，按新语言重渲染语言/音色下拉并保留当前选中
+  if (langGroups.length) {
+    const langSel = document.getElementById("lang");
+    const prevLang = langSel.value;
+    const voiceSel = document.getElementById("voice");
+    const prevVoice = voiceSel.value;
+    fillLangSelect();
+    if (prevLang && [...langSel.options].some((o) => o.value === prevLang)) {
+      langSel.value = prevLang;
+    } else {
+      applyDefaultLang();
+    }
+    fillVoiceSelect();
+    if (prevVoice && [...voiceSel.options].some((o) => o.value === prevVoice)) {
+      voiceSel.value = prevVoice;
+    }
+    updateBridgeNotice(voicesOnline); // 重渲染后按真实在线状态重显提示
+  }
 }
 
 function render(result) {
@@ -544,15 +769,18 @@ function stopReading() {
 
 const LAST_VOICE_KEY = "lastVoice";
 const LAST_RATE_KEY = "lastRate";
+const LAST_LANG_KEY = "lastLang";
 
-function restoreLastVoice() {
-  chrome.storage.local.get(LAST_VOICE_KEY, (result) => {
-    const lastVoice = result[LAST_VOICE_KEY];
-    if (lastVoice) {
-      const select = document.getElementById("voice");
-      if ([...select.options].some((opt) => opt.value === lastVoice)) {
-        select.value = lastVoice;
-      }
+function restoreLastSelection() {
+  chrome.storage.local.get([LAST_LANG_KEY, LAST_VOICE_KEY], (result) => {
+    const langSel = document.getElementById("lang");
+    const voiceSel = document.getElementById("voice");
+    if (result[LAST_LANG_KEY] && [...langSel.options].some((o) => o.value === result[LAST_LANG_KEY])) {
+      langSel.value = result[LAST_LANG_KEY];
+      fillVoiceSelect();
+    }
+    if (result[LAST_VOICE_KEY] && [...voiceSel.options].some((o) => o.value === result[LAST_VOICE_KEY])) {
+      voiceSel.value = result[LAST_VOICE_KEY];
     }
   });
 }
@@ -568,6 +796,14 @@ function restoreLastRate() {
     }
   });
 }
+
+document.getElementById("lang").addEventListener("change", (e) => {
+  chrome.storage.local.set({ [LAST_LANG_KEY]: e.target.value });
+  // 语言切换后重建音色下拉，并同步保存当前音色
+  fillVoiceSelect();
+  const voiceSel = document.getElementById("voice");
+  chrome.storage.local.set({ [LAST_VOICE_KEY]: voiceSel.value });
+});
 
 document.getElementById("voice").addEventListener("change", (e) => {
   chrome.storage.local.set({ [LAST_VOICE_KEY]: e.target.value });
@@ -621,10 +857,10 @@ document.getElementById("clearLog").addEventListener("click", () => {
   });
 });
 
-// 启动：先按浏览器系统语言铺好界面，再恢复上次偏好、拉取内容、轮询朗读状态
+// 启动：先按浏览器系统语言铺好界面，再拉取音色清单并恢复上次偏好、拉取内容、轮询朗读状态
 UI_LOCALE = detectUiLanguage();
 applyUiLanguage();
-restoreLastVoice();
+loadVoices().then(() => restoreLastSelection());
 restoreLastRate();
 fetchLatest();
 refreshReadingState();

@@ -33,6 +33,27 @@
   const IFRAME_SELECTOR = "iframe#kookit-iframe";
   const SELECTOR = "p, h1, h2, h3, h4, h5, h6";
 
+  // DOM 结构诊断：输出当前 kookit-iframe 的数量 / id 和 iframe body 的文本概况。
+  // 用于定位"高亮索引章节 ≠ 朗读/选中章节"的根因——可能是多 iframe（content 只
+  // 拿第一个），也可能是 Koodo 按视口渲染导致 body 内容随翻页/滚动变化。
+  function domStructureInfo() {
+    const iframes = document.querySelectorAll(IFRAME_SELECTOR);
+    const info = {
+      iframeCount: iframes.length,
+      iframeIds: Array.from(iframes).map((f) => f.id || "(no-id)"),
+    };
+    const doc = getIframeDocument();
+    if (doc && doc.body) {
+      const t = doc.body.textContent.replace(/\s+/g, " ").trim();
+      info.bodyLen = t.length;
+      info.bodyHead = t.slice(0, 30);
+    } else {
+      info.bodyLen = -1;
+      info.bodyHead = "(no body)";
+    }
+    return info;
+  }
+
   // 跟 content-playbooks.js 里 TERMINAL_PUNCTUATION 同一份规则：判断一段文字
   // 是不是"正常收尾"，用来识别口号式短段落（不以标点结尾的短行当 heading 处理）。
   const TERMINAL_PUNCTUATION = /[。！？…—」』）)\]"'".!?;:''"]$/;
@@ -334,6 +355,106 @@
 
   let currentHighlightMarks = [];
 
+  // ---- 高亮定位状态（方案A：单向推进 + 修对称性）----
+  // searchIndex 与提取侧（pushParagraph + buildChunksFromChapterData）完全同规则构建：
+  // body 段文本归一化后连续拼接（段落间不插空格），heading 段单独记录。这样 chunk
+  // （来自 body 拼接串）必然是这个索引串的精确子串，完整匹配接近 100%，不再依赖
+  // 容错缩短去碰运气。lastEndChar 记录上次 chunk 在索引串里的结束位置，下次从它
+  // 之后开始找——保证高亮严格单向推进，即使文本重复也不会跳回前面（韩文高亮
+  // 跳回前面的根因就是"全文 indexOf 命中前面重复处"）。
+  let highlightIndexDoc = null;
+  let highlightIndex = null; // { combined, charMap, headings: [{norm,map}] }
+  let lastEndChar = -1;
+
+  function resetHighlightState() {
+    highlightIndexDoc = null;
+    highlightIndex = null;
+    lastEndChar = -1;
+  }
+
+  // 归一化单个元素文本：逐字符产出 normalized 串，并记录每个"真实字符"→(textNode, offset)
+  // 映射。规则与提取侧 pushParagraph 的 text.replace(/\s+/g," ").trim() 完全一致。
+  // 归一化过程中产生的空格映射到"它对应的原始空白字符位置"（而不是前一字符），
+  // 这样按 map 重建 Range 时空格能被正确覆盖，不会在高亮区域内缺漏空格。
+  function normalizeElementText(doc, el) {
+    const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+    let norm = "";
+    const map = [];
+    let pendingSpace = false;
+    let pendingSpaceInfo = null;
+    let inLeadingWs = true;
+    for (const tn of nodes) {
+      const s = tn.textContent;
+      for (let j = 0; j < s.length; j++) {
+        const ch = s[j];
+        if (/\s/.test(ch)) {
+          if (!inLeadingWs && !pendingSpace) {
+            pendingSpace = true;
+            pendingSpaceInfo = { node: tn, offset: j }; // 记住空白字符真实位置
+          }
+        } else {
+          if (pendingSpace) {
+            norm += " ";
+            map.push(pendingSpaceInfo);
+            pendingSpace = false;
+            pendingSpaceInfo = null;
+          }
+          inLeadingWs = false;
+          norm += ch;
+          map.push({ node: tn, offset: j });
+        }
+      }
+    }
+    return { norm, map };
+  }
+
+  // 构建搜索索引：复刻提取侧的 body/heading 分类（与 pushParagraph 同规则）
+  function buildHighlightIndex(doc) {
+    const seen = new Set();
+    const bodyPieces = [];
+    const headings = [];
+    doc.body.querySelectorAll(SELECTOR).forEach((el) => {
+      if (seen.has(el)) return;
+      seen.add(el);
+      const { norm, map } = normalizeElementText(doc, el);
+      if (!norm) return;
+      const tag = el.tagName.toLowerCase();
+      const isHeading =
+        /^h[1-6]$/.test(tag) ||
+        (!TERMINAL_PUNCTUATION.test(norm) && Array.from(norm).length <= SHORT_LINE_MAX);
+      if (isHeading) headings.push({ norm, map });
+      else bodyPieces.push({ norm, map });
+    });
+    let combined = "";
+    const charMap = [];
+    for (const piece of bodyPieces) {
+      for (let k = 0; k < piece.norm.length; k++) {
+        charMap.push(piece.map[k]);
+      }
+      combined += piece.norm;
+    }
+    // 索引构建快照：供与日志开头"提取到整章 N 段"的 preview 对比，
+    // 定位"提取时刻 DOM ≠ 高亮时刻 DOM"是否导致未命中
+    if (typeof diagLog === "function") {
+      diagLog("索引构建快照", {
+        bodyCount: bodyPieces.length,
+        headingCount: headings.length,
+        bodyPreview: bodyPieces.slice(0, 12).map((p) => p.norm.slice(0, 12)),
+        headingPreview: headings.slice(0, 12).map((h) => h.norm.slice(0, 12)),
+        dom: domStructureInfo(),
+      });
+    }
+    return {
+      combined,
+      charMap,
+      headings,
+      bodyLen: doc.body.textContent.replace(/\s+/g, " ").trim().length,
+    };
+  }
+
   function clearHighlight() {
     for (const mark of currentHighlightMarks) {
       const parent = mark.parentNode;
@@ -345,73 +466,221 @@
     currentHighlightMarks = [];
   }
 
-  // 用整段 chunk 文字在 body 里定位，拆成多个不跨元素的小 Range 分别高亮——
-  // 跟 content-playbooks.js 里验证过的思路一致：完整匹配优先，匹配失败就
-  // 逐步缩短容错；surroundContents 只能处理"起点终点落在同一父节点"的范围，
-  // 拆成多段各自限定在单一文本节点内，避免跨段落导致整体失败。
+  // 用整段 chunk 文字在索引串里定位，拆成多个不跨元素的小 Range 分别高亮——
+  // 搜索索引与提取侧完全同规则构建（body 连续拼接、heading 独立），因此 chunk
+  // 必为索引串的精确子串，完整匹配优先；仅在极端边界（如 DOM 与提取瞬间不一致）
+  // 时按旧规则逐步缩短容错。surroundContents 只能处理"起点终点落在同一父节点"
+  // 的范围，拆成多段各自限定在单一文本节点内，避免跨段落导致整体失败。
   const MIN_MATCH_LEN = 6;
+  // 记录最近一次 rangesForCharMap 建 Range 的失败次数。Koodo 在朗读过程中会
+  // 重排/懒渲染 DOM（古籍长文多栏排版尤其频繁），首次构建索引时记下的 textNode
+  // 引用可能失效，setStart/setEnd 抛 IndexSizeError。失败数 >0 说明 charMap 已过期，
+  // 需要重建索引后再定位，否则高亮会缺失（ranges 空）或只盖住部分区间（高亮偏短）。
+  let highlightRangeFailures = 0;
 
   function findRangesForText(doc, searchText) {
     const fullText = searchText.replace(/\s+/g, " ").trim();
     if (!fullText || !doc.body) return [];
 
-    const textNodes = [];
-    let combined = "";
-    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null);
-    let node;
-    while ((node = walker.nextNode())) {
-      textNodes.push({ node, start: combined.length });
-      combined += node.textContent;
-    }
-
-    const normalizedCombined = combined.replace(/\s+/g, " ");
-
-    let matchLen = fullText.length;
-    let idx = -1;
-    let searchStr = fullText;
-    while (matchLen >= MIN_MATCH_LEN) {
-      searchStr = fullText.slice(0, matchLen);
-      idx = normalizedCombined.indexOf(searchStr);
-      if (idx !== -1) break;
-      matchLen = Math.floor(matchLen * 0.75);
-    }
-    if (idx === -1) return [];
-
-    let foundIdx = combined.indexOf(searchStr);
-    if (foundIdx === -1) foundIdx = idx;
-
-    let startNodeIdx = -1, startOffset = 0;
-    for (let i = textNodes.length - 1; i >= 0; i--) {
-      if (textNodes[i].start <= foundIdx) {
-        startNodeIdx = i;
-        startOffset = foundIdx - textNodes[i].start;
-        break;
+    // 跨章节 / 首次：重建搜索索引（索引与提取侧同规则，chunk 必为其精确子串）。
+    // Koodo 复用同一个 iframe 对象、按视口动态替换 body 内容（翻章/滚动都会换），
+    // doc 引用永远不变，仅靠 doc!==highlightIndexDoc 检测不到内容变化 → 索引过期。
+    // 因此额外用「索引串是否还包含 chunk 前缀」探测索引是否过期：索引里找不到
+    // chunk（DOM 换章节/视口切换导致旧索引与当前内容不匹配）→ 重建并重置锚点
+    // （新内容从头找）。注意不能用「当前 body 是否包含 chunk」判断——用户选中的
+    // 文本一定在当前 body 里，但索引可能还是旧章节的，那样会误判"索引有效"
+    // 而用旧章节索引找新章节文本 → 永久未命中。
+    if (doc === highlightIndexDoc && highlightIndex) {
+      const probe = fullText.slice(0, 20);
+      if (highlightIndex.combined.indexOf(probe) === -1) {
+        diagLog("DOM 内容变化检测：chunk 前缀不在索引串，重建索引并重置锚点", {
+          oldBodyLen: highlightIndex.bodyLen,
+          newBodyLen: doc.body.textContent.replace(/\s+/g, " ").trim().length,
+        });
+        highlightIndex = buildHighlightIndex(doc);
+        highlightIndexDoc = doc;
+        lastEndChar = -1;
       }
     }
-    if (startNodeIdx === -1) return [];
+    if (doc !== highlightIndexDoc || !highlightIndex) {
+      highlightIndex = buildHighlightIndex(doc);
+      highlightIndexDoc = doc;
+      lastEndChar = -1;
+    }
+    const { combined, charMap, headings } = highlightIndex;
+    if (!combined) return [];
 
-    const ranges = [];
-    let remaining = fullText.length;
-    let curOffset = startOffset;
-    for (let ti = startNodeIdx; ti < textNodes.length && remaining > 0; ti++) {
-      const tn = textNodes[ti].node;
-      const available = tn.textContent.length - curOffset;
-      const take = Math.min(available, remaining);
-      if (take > 0) {
-        const segmentText = tn.textContent.slice(curOffset, curOffset + take);
-        if (segmentText.trim().length > 0) {
-          try {
-            const r = doc.createRange();
-            r.setStart(tn, curOffset);
-            r.setEnd(tn, curOffset + take);
-            ranges.push(r);
-          } catch (e) {
-            // 跳过这一小段，不影响其他段落继续
+    // 方案A：从上次 chunk 结束位置之后开始找（单向推进，杜绝跳回前面）
+    const from = Math.max(0, lastEndChar);
+
+    // 完整匹配优先（修对称性后接近 100% 成功）
+    let idx = combined.indexOf(fullText, from);
+    let matchedLen = fullText.length;
+
+    // 完整匹配失败（极端边界）→ 按旧规则容错缩短前缀再找
+    if (idx === -1) {
+      let matchLen = fullText.length;
+      while (matchLen >= MIN_MATCH_LEN) {
+        const sub = fullText.slice(0, matchLen);
+        idx = combined.indexOf(sub, from);
+        if (idx !== -1) {
+          matchedLen = matchLen;
+          break;
+        }
+        matchLen = Math.floor(matchLen * 0.75);
+      }
+    }
+
+    // body 主串里找不到 → 尝试 heading 块（heading 独立，不参与 body 单向链）
+    if (idx === -1) {
+      for (const h of headings) {
+        if (h.norm === fullText || fullText.startsWith(h.norm) || h.norm.startsWith(fullText)) {
+          return rangesForCharMap(doc, h.map, 0, h.norm.length);
+        }
+      }
+      // 自愈兜底：单向推进（from=lastEndChar）失败时，锚点可能已被污染
+      // （例如早期版本重开朗读未重置 lastEndChar），此时退回到全文 from=0
+      // 再完整匹配一次。正常路径（锚点干净）不会走到这里。
+      if (lastEndChar > 0) {
+        const retryIdx = combined.indexOf(fullText);
+        if (retryIdx !== -1) {
+          const retryEnd = retryIdx + fullText.length;
+          const retryRanges = rangesForCharMap(doc, charMap, retryIdx, retryEnd);
+          if (retryRanges.length > 0) {
+            lastEndChar = retryEnd; // 用正确位置重置锚点，后续继续单向推进
+            return retryRanges;
           }
         }
       }
-      remaining -= take;
-      curOffset = 0;
+      // 未命中诊断：把 chunk 前缀在索引串里的真实位置 / 附近文本打出来，
+      // 用于定位"提取侧文本 ≠ 搜索侧索引"的具体差异点
+      if (typeof diagLog === "function") {
+        const probe = fullText.slice(0, 16);
+        const probeIdx0 = combined.indexOf(probe); // 全文首现位置
+        const probeFrom = combined.indexOf(probe, from); // 从锚点起
+        const aroundStart = Math.max(0, from);
+        const around = combined.slice(aroundStart, Math.min(combined.length, aroundStart + 140));
+        // 检查 chunk 前缀是否被搜索侧判成了 heading（不在 body 主串里）
+        let headingHit = null;
+        for (const h of headings) {
+          if (h.norm.includes(probe)) { headingHit = h.norm.slice(0, 24); break; }
+        }
+        diagLog(
+          "未命中诊断：前缀探针位置",
+          {
+            probe,
+            probeIdx0,
+            probeFrom,
+            headingHit, // 若非 null：chunk 前缀其实在某个 heading 里 → 分类不对称
+            combinedLen: combined.length,
+            headingsCount: headings.length,
+            lastEndChar,
+            fullTextLen: fullText.length,
+            around, // 搜索起点 from 之后约 140 字，供人工比对
+          }
+        );
+      }
+      return [];
+    }
+
+    const end = idx + matchedLen;
+    // 向后扩展：完整匹配失败、走了容错缩短时，命中串可能只是 chunk 的前缀。
+    // 这里沿 fullText 逐字符对齐扩展，把索引串里能对上的剩余文字也罩住——
+    // 避免"高亮只盖住一截"（与 content-playbooks.js 的 coverLen 逻辑一致）。
+    // matched 是实际命中的串（完整匹配时即 fullText，容错时是缩短后的前缀）。
+    let coverLen = matchedLen;
+    let fi = matchedLen === fullText.length ? 0 : fullText.indexOf(fullText.slice(0, matchedLen));
+    if (fi < 0) fi = 0;
+    let ni = idx + matchedLen;
+    let ti = fi + matchedLen;
+    while (ti < fullText.length && ni < combined.length) {
+      const want = fullText[ti];
+      const got = combined[ni];
+      if (want === got) { ti++; ni++; coverLen++; continue; }
+      // 任一侧是空格则跳过再比
+      if (want === " ") { ti++; continue; }
+      if (got === " ") { ni++; coverLen++; continue; }
+      break;
+    }
+    const ranges = rangesForCharMap(doc, charMap, idx, idx + coverLen);
+    if (ranges.length > 0 && highlightRangeFailures === 0) {
+      lastEndChar = idx + coverLen; // 记录本次 chunk 结束位置，供下次单向推进
+      return ranges;
+    }
+    // charMap 的 textNode 已被 Koodo 重排/懒渲染失效（Range 建失败）：
+    // 命中文本正确，但映射到的 DOM 节点已变 → 用当前 DOM 重建索引后重试，
+    // 否则高亮会缺失（ranges 空）或只盖住部分区间（部分失败）。
+    return retryHighlightWithRebuild(doc, fullText, idx);
+  }
+
+  // charMap 失效时的兜底：基于当前 DOM 重建索引，优先从旧命中位置附近重找，
+  // 避免重建后从 from=0 命中前面重复处导致高亮跳回。
+  function retryHighlightWithRebuild(doc, fullText, oldIdx) {
+    if (typeof diagLog === "function") {
+      diagLog("高亮兜底：charMap 失效，重建索引重试", {
+        oldIdx,
+        text: fullText.slice(0, 16),
+      });
+    }
+    resetHighlightState();
+    highlightIndex = buildHighlightIndex(doc);
+    highlightIndexDoc = doc;
+    const c = highlightIndex.combined;
+    if (!c) return [];
+    const newFrom = Math.max(0, oldIdx - 3);
+    let ri = c.indexOf(fullText, newFrom);
+    let rl = fullText.length;
+    if (ri === -1) {
+      // 旧位置附近没有（DOM 重排可能移动了文本）→ 全文兜底
+      ri = c.indexOf(fullText);
+    }
+    if (ri !== -1) {
+      const rr = rangesForCharMap(doc, highlightIndex.charMap, ri, ri + rl);
+      if (rr.length > 0) {
+        lastEndChar = ri + rl;
+        return rr;
+      }
+    }
+    return [];
+  }
+
+  // 把 charMap 的 [start,end) 拆成不跨文本节点的 Range 数组（供 surroundContents）
+  function rangesForCharMap(doc, charMap, start, end) {
+    highlightRangeFailures = 0;
+    const ranges = [];
+    let curNode = null;
+    let curStart = 0;
+    let curEnd = 0;
+    for (let p = start; p < end; p++) {
+      const m = charMap[p];
+      if (!m) continue;
+      if (m.node !== curNode) {
+        if (curNode) {
+          try {
+            const r = doc.createRange();
+            r.setStart(curNode, curStart);
+            r.setEnd(curNode, curEnd);
+            ranges.push(r);
+          } catch (e) {
+            highlightRangeFailures++;
+          }
+        }
+        curNode = m.node;
+        curStart = m.offset;
+        curEnd = m.offset + 1;
+      } else {
+        curEnd = m.offset + 1;
+      }
+    }
+    if (curNode) {
+      try {
+        const r = doc.createRange();
+        r.setStart(curNode, curStart);
+        r.setEnd(curNode, curEnd);
+        ranges.push(r);
+      } catch (e) {
+        highlightRangeFailures++;
+      }
     }
     return ranges;
   }
@@ -523,24 +792,22 @@ function highlightChunk(text) {
   highlightDebounceTimer = setTimeout(() => {
     if (bodyObserver) bodyObserver.disconnect();
     try {
+      // 新 chunk 到达，取消上一 chunk 的未命中重试（避免旧文本延迟命中贴错位置）
+      clearHighlightRetries();
       clearHighlight();
-      if (!text) return;
-
-      const ranges = findRangesForText(doc, text);
-      for (const range of ranges) {
-        try {
-          const mark = doc.createElement("mark");
-          mark.style.cssText = [
-            "background: rgba(255, 200, 0, 0.45)",
-            "color: inherit",
-            "border-radius: 3px",
-            "padding: 0 1px",
-          ].join(";");
-          range.surroundContents(mark);
-          currentHighlightMarks.push(mark);
-        } catch (e) {}
+      if (!text) {
+        // 停止/清空高亮：重置单向推进锚点，下次重新朗读从新索引起点开始
+        resetHighlightState();
+        diagLog("高亮清空：重置锚点", { lastEndChar: -1 });
+        return;
       }
-      ensureHighlightVisible(doc);
+
+      if (applyHighlightRanges(doc, text)) {
+        safeSendMessage({ type: "KOODO_HIGHLIGHT_HIT" });
+      } else {
+        diagLog("高亮未命中，安排延迟重试", { preview: text.slice(0, 20), lastEndChar });
+        retryMissedHighlight(doc, text, 0);
+      }
     } catch (e) {
     } finally {
       if (doc.body) watchIframeBody(doc);
@@ -548,9 +815,146 @@ function highlightChunk(text) {
   }, 50);
 }
 
+// 用 chunk 文本在索引串里定位并创建高亮 mark。成功（至少建出一个 mark）返回 true。
+// highlightChunk 首试与 retryMissedHighlight 延迟重试共用，保证两处行为一致。
+function applyHighlightRanges(doc, text) {
+  const ranges = findRangesForText(doc, text);
+  diagLog(
+    `高亮定位 ${ranges.length > 0 ? "命中" : "未命中"}，text=${text.slice(0, 24)}…`,
+    {
+      ranges: ranges.length,
+      lastEndChar,
+      from: Math.max(0, lastEndChar - (text.replace(/\s+/g, " ").trim().length || 1)),
+    }
+  );
+  if (ranges.length === 0) return false;
+
+  for (const range of ranges) {
+    try {
+      const mark = doc.createElement("mark");
+      mark.style.cssText = [
+        "background: rgba(255, 200, 0, 0.45)",
+        "color: inherit",
+        "border-radius: 3px",
+        "padding: 0 1px",
+      ].join(";");
+      range.surroundContents(mark);
+      currentHighlightMarks.push(mark);
+    } catch (e) {}
+  }
+  ensureHighlightVisible(doc);
+  return currentHighlightMarks.length > 0;
+}
+
+// 高亮未命中时的延迟重试：逐档等待（给 Koodo 渲染 / 数据到达留时间），
+// 全部失败后通知 background 走"翻页跳过"兜底——对齐 Play Books 的空页逻辑，
+// 避免"抓不到文本的页面"一直卡住无高亮。
+const HIGHLIGHT_RETRY_MS = [300, 700, 1200, 2000, 3000];
+let highlightRetryTimers = [];
+
+function clearHighlightRetries() {
+  for (const t of highlightRetryTimers) clearTimeout(t);
+  highlightRetryTimers = [];
+}
+
+function retryMissedHighlight(doc, text, attempt) {
+  if (attempt >= HIGHLIGHT_RETRY_MS.length) {
+    // 全部重试仍失败：上报 background，由它决定翻页跳过或停止（连续翻页仍无改善）
+    safeSendMessage({ type: "KOODO_HIGHLIGHT_MISS" });
+    return;
+  }
+  const t = setTimeout(() => {
+    if (!currentDoc) return;
+    if (bodyObserver) bodyObserver.disconnect();
+    try {
+      if (applyHighlightRanges(currentDoc, text)) {
+        safeSendMessage({ type: "KOODO_HIGHLIGHT_HIT" });
+        return;
+      }
+      retryMissedHighlight(currentDoc, text, attempt + 1);
+    } catch (e) {
+    } finally {
+      if (currentDoc.body) watchIframeBody(currentDoc);
+    }
+  }, HIGHLIGHT_RETRY_MS[attempt]);
+  highlightRetryTimers.push(t);
+}
+
+  // ---- 空页（纯图片/空白页）检测与自动翻页上报 ----
+  // Koodo 按视口懒加载章节，遇到没有 p/h 文本的页面（封面、插画章、空白页），
+  // extractChapterText 返回 null → 不发 KOODO_CHAPTER_UPDATED → background 拿不到
+  // 内容 → 既不高亮也不翻页，朗读卡死。这里把"当前是空页"连同页面指纹上报
+  // background，由它（仅在朗读中）触发滚动翻页跳过；翻页后如果 body 恢复文本，
+  // extractChapterText 有值 → 自动停止上报。
+  let emptyPageTimer = null;
+
+  // 空页指纹：文本特征 + 图片特征 + 滚动位置。background 用"翻页后内容有没有变化"
+  // 判断是否到书尾——连续 N 次无变化才停。不能用"连续无文本"判断：书中间可能有
+  // 连续插画页（不同内容但都无文本），后面还有正文；滚动到底时内容才稳定不变。
+  // imgSrcs 同时是诊断锚：验证 Koodo 不同插画页的 img 占位符是否可区分。
+  function getEmptyPageFingerprint(doc) {
+    const body = doc.body;
+    const text = (body.textContent || "").replace(/\s+/g, " ").trim();
+    const imgs = body.querySelectorAll("img");
+    const imgSrcs = [];
+    for (const img of imgs) {
+      imgSrcs.push(img.getAttribute("src") || img.getAttribute("data-src") || img.getAttribute("alt") || "");
+    }
+    let scrollY = 0;
+    try {
+      if (doc.defaultView) scrollY = doc.defaultView.scrollY || 0;
+    } catch (e) {}
+    return {
+      textLen: text.length,
+      textHead: text.slice(0, 40),
+      imgCount: imgs.length,
+      imgSrcs: imgSrcs.slice(0, 5),
+      scrollY,
+    };
+  }
+
+  function stopEmptyPageReport() {
+    if (emptyPageTimer) {
+      clearInterval(emptyPageTimer);
+      emptyPageTimer = null;
+    }
+  }
+
+  function scheduleEmptyPageReport() {
+    if (emptyPageTimer) return; // 已在周期上报中
+    const fire = () => {
+      const d = getIframeDocument();
+      if (!d || !d.body) {
+        stopEmptyPageReport();
+        return;
+      }
+      if (extractChapterText()) {
+        // body 恢复文本了（滚动/翻页到正文），停止空页上报
+        stopEmptyPageReport();
+        return;
+      }
+      const fp = getEmptyPageFingerprint(d);
+      diagLog("空页周期上报（无 p/h 文本，触发朗读中自动翻页）", fp);
+      safeSendMessage({ type: "KOODO_EMPTY_PAGE", fingerprint: fp });
+    };
+    fire();
+    emptyPageTimer = setInterval(fire, 1000);
+  }
+
   function reportIfChanged() {
     const extracted = extractChapterText();
-    if (!extracted) return;
+    if (!extracted) {
+      // 空页：body 存在但无 p/h 文本（纯图片/空白页）。周期上报给 background，
+      // 由它（仅在朗读中）触发滚动翻页跳过；恢复文本后自动停止上报。
+      // 守卫：只有本实例之前成功提取过正文（__hasEverMatched）才启动空页上报，
+      // 对齐 Play Books —— 用户只是手动翻到插画页浏览（从未提取过正文）时不上报，
+      // 避免未朗读的 tab/页面也产生空页上报流，污染正在朗读的 tab（"插画后遇文本"跳页）。
+      const doc = getIframeDocument();
+      if (doc && doc.body && window.__hasEverMatched) scheduleEmptyPageReport();
+      return;
+    }
+    stopEmptyPageReport();
+    window.__hasEverMatched = true;
 
     const serialized = JSON.stringify(extracted.data);
     if (serialized === lastReportedText) return;
@@ -558,6 +962,7 @@ function highlightChunk(text) {
 
     diagLog(`提取到整章 ${extracted.data.length} 段`, {
       preview: extracted.data.slice(0, 3).map((d) => d.text.slice(0, 15)),
+      dom: domStructureInfo(),
     });
 
     safeSendMessage({
@@ -663,12 +1068,26 @@ function highlightChunk(text) {
         (extracted ? findVisibleStartIndex(extracted) : { segmentIndex: 0, charOffset: 0 });
       diagLog(`回应起点查询：segmentIndex=${result.segmentIndex}, charOffset=${result.charOffset}`, {
         fromSelection: !!selectionResult,
+        dom: domStructureInfo(),
       });
       sendResponse(result);
       return true;
     }
     if (message.type === "HIGHLIGHT_CHUNK") {
       highlightChunk(message.text);
+    }
+    if (message.type === "KOODO_START_READING" || message.type === "KOODO_STOP_READING") {
+      // 朗读停止/重新开始时停掉空页周期上报：emptyPageTimer 只在"提取到文本"时
+      // 自己停，朗读停止后它仍会继续上报旧页面指纹，残留上报会在下一次朗读开始时
+      // 被 background 误判为"当前页是空页"而触发翻页（"有文本连续跳页"）。这里
+      // background 在 stop/start 时都会广播一条，所有 content 实例（含旧实例）都停。
+      stopEmptyPageReport();
+    }
+    if (message.type === "KOODO_TURN_PAGE") {
+      // background 判定"连续多个 chunk 高亮未命中"后触发：滚动翻页跳过，
+      // 让 Koodo 渲染出后续内容（对齐 Play Books 空页自动翻页兜底）。
+      diagLog("收到 KOODO_TURN_PAGE，滚动翻页跳过");
+      simulateNextPageKey();
     }
     if (message.type === "KOODO_NEXT_CHAPTER") {
       simulateNextChapter();

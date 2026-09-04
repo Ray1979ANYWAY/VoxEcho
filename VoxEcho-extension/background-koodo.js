@@ -51,7 +51,52 @@ const DEFAULT_STATE = {
   rate: 1,
   connectionStatus: "idle", // idle | ok | error
   waitingForNextChapter: false,
+  // 高亮未命中 → 自动翻页兜底（对齐 Play Books 空页逻辑）：
+  highlightMissStreak: 0, // 连续未命中的 chunk 数
+  pageTurnStreak: 0, // 连续"翻页仍抓不到文本"的次数
+  // 空页（纯图片/空白页，无 p/h 文本）→ 朗读中自动翻页跳过：
+  emptyPageStallCount: 0, // 连续"翻页后页面内容无变化"的次数
+  emptyLastFingerprint: null, // 上次空页翻页时的页面指纹
+  emptyLastTurnAt: 0, // 上次空页翻页的时间戳（节流用）
 };
+
+// 连续 N 个 chunk 高亮未命中才触发一次翻页（单个未命中多为瞬态抖动，不翻）
+const MAX_MISS_BEFORE_TURN = 3;
+// 连续翻 N 次页仍抓不到文本（大概率图片区段 / 章节末尾无正文），停止朗读防无限翻
+const MAX_PAGE_TURNS = 3;
+// 空页翻页的结束判断：连续 N 次"翻页后页面内容无变化"才认为到书尾。
+// 不能用"连续 N 次无文本"判断——书中间可能有连续插画页（内容不同但都无文本），
+// 后面还有正文；滚动到底时页面内容才稳定不变，那才是真正的终点。
+const MAX_EMPTY_STALL = 4;
+// 两次空页翻页的最小间隔：给 Koodo 翻页动画 / 章节懒加载留出时间，避免疯狂连翻
+const EMPTY_TURN_INTERVAL_MS = 1200;
+
+// "读完一章 → 切下一章"的等待超时句柄：只有真的没有下一章（或切章后没等到内容）
+// 才停止朗读。空页翻页（在找下一页/下一章内容）时必须重置它，否则空页翻页耗时
+// 超过该窗口会被误判成"没有下一章"而提前停止。
+let nextChapterTimeoutHandle = null;
+
+// 武装"等下一章"超时：切章后若 MAX_NEXT_CHAPTER_WAIT_MS 内既没等到新章节内容、
+// 也没有继续翻页的动作，判定为已到全书最后一章，停止朗读。
+const MAX_NEXT_CHAPTER_WAIT_MS = 8000;
+
+function clearNextChapterTimeout() {
+  if (nextChapterTimeoutHandle) {
+    clearTimeout(nextChapterTimeoutHandle);
+    nextChapterTimeoutHandle = null;
+  }
+}
+
+function armNextChapterTimeout(tabId) {
+  clearNextChapterTimeout();
+  nextChapterTimeoutHandle = setTimeout(async () => {
+    const s = await getReadingState();
+    if (s.isReading && s.waitingForNextChapter && s.tabId === tabId) {
+      logEvent("background", "[koodo] 没有等到下一章（可能已是最后一章），停止朗读");
+      await stopReading();
+    }
+  }, MAX_NEXT_CHAPTER_WAIT_MS);
+}
 
 async function getReadingState() {
   const result = await chrome.storage.session.get(KOODO_STATE_KEY);
@@ -97,6 +142,7 @@ function buildChunksFromChapterData(items) {
 
 // ---- 开始朗读：从当前可见的位置开始 ----
 async function startReading(tabId, voice, rate, { fromStart = false } = {}) {
+  clearNextChapterTimeout(); // 新一轮朗读开始，任何"等下一章"超时都不再适用
   let segmentIndex = 0;
   let charOffset = 0;
 
@@ -151,13 +197,30 @@ async function startReading(tabId, voice, rate, { fromStart = false } = {}) {
     voice,
     rate,
     connectionStatus: "ok",
-	waitingForNextChapter: false
+	waitingForNextChapter: false,
+	highlightMissStreak: 0,
+	pageTurnStreak: 0,
+	emptyPageStallCount: 0,
+	emptyLastFingerprint: null,
+	emptyLastTurnAt: 0
   });
+
+  // 通知 content 停掉旧的空页周期上报：换书/切页后可能残留上一本书的空页上报实例，
+  // 开始朗读时统一清零，新朗读从当前页重新检测空页状态。
+  chrome.tabs.sendMessage(tabId, { type: "KOODO_START_READING" }).catch(() => {});
 
   return { ok: true };
 }
 
 async function stopReading() {
+  clearNextChapterTimeout();
+  const prev = await getReadingState();
+  if (prev.tabId) {
+    // 通知 content 停止空页周期上报：停止朗读后 emptyPageTimer 不会自己停，
+    // 残留实例的旧页面空页上报会在下一次朗读开始时被误当成"当前页是空页"处理，
+    // 导致刚点开始朗读就把正在读的正文页翻走（"有文本连续跳页"）。
+    chrome.tabs.sendMessage(prev.tabId, { type: "KOODO_STOP_READING" }).catch(() => {});
+  }
   await setReadingState({ ...DEFAULT_STATE });
   sendToOffscreen({ type: "OFFSCREEN_STOP" }, 1).catch(() => {});
 }
@@ -186,6 +249,15 @@ export function handleKoodoMessage(message, sender, sendResponse) {
   (async () => {
     await saveChapterForTab(sender.tab.id, message.url, message.data);
     const state = await getReadingState();
+    // 翻到有文本的章节（可能是"插画区空页翻页"后终于翻到正文页）：重置
+    // 空页翻页的指纹/停滞计数，避免上一段的空页状态残留到这一章——否则空页
+    // 翻页的"内容无变化→书尾"误判会把新章的朗读提前停掉（"插画后遇文本"跳页）。
+    if (state.tabId === sender.tab.id && message.data && message.data.length > 0) {
+      if (state.emptyLastFingerprint || state.emptyPageStallCount) {
+        logEvent("background", "[koodo] 提取到有文本章节，重置空页翻页状态");
+        await setReadingState({ emptyPageStallCount: 0, emptyLastFingerprint: null });
+      }
+    }
     if (
       state.isReading &&
       state.waitingForNextChapter &&
@@ -286,6 +358,98 @@ export function handleKoodoMessage(message, sender, sendResponse) {
       return;
     }
 
+    case "KOODO_EMPTY_PAGE": {
+      // content 检测到当前页面无 p/h 文本（纯图片/空白页）时的周期上报。
+      // 只在朗读中自动翻页跳过（用户手动浏览封面/插画不打扰）；
+      // 用"翻页后页面内容有没有变化"判断是否到书尾：连续 MAX_EMPTY_STALL 次
+      // 翻页后内容仍无变化（滚动到底、Koodo 不再懒加载新内容）→ 停止朗读。
+      (async () => {
+        const state = await getReadingState();
+        if (!state.isReading || !state.tabId) return;
+        // 只处理"正在朗读的那个 tab"发来的空页上报：其他 tab（比如还停在插画页的
+        // 旧页面 / 另一本正在空页翻页的书）的残留空页上报如果也处理，会把正在朗读
+        // 的页面翻走（"插画后遇文本" / 多 tab 跳页）。对齐 Play Books 的
+        // PAGE_TEXT_UPDATED 空页分支（那里用 tabId = sender.tab.id 校验过了）。
+        if (sender.tab && sender.tab.id !== state.tabId) return;
+        const now = Date.now();
+        // 节流：Koodo 翻页动画 / 章节懒加载需要时间，避免疯狂连翻
+        if (now - (state.emptyLastTurnAt || 0) < EMPTY_TURN_INTERVAL_MS) return;
+        const fp = message.fingerprint || null;
+        const last = state.emptyLastFingerprint || null;
+        const same =
+          last &&
+          fp &&
+          fp.textLen === last.textLen &&
+          fp.imgCount === last.imgCount &&
+          JSON.stringify(fp.imgSrcs || []) === JSON.stringify(last.imgSrcs || []) &&
+          Math.abs((fp.scrollY || 0) - (last.scrollY || 0)) < 2;
+        const stall = same ? (state.emptyPageStallCount || 0) + 1 : 0;
+        // 空页翻页与"高亮未命中翻页"互斥：空页本来就没有可高亮的内容，MISS 计数
+        // 清零，避免两个翻页逻辑同时触发导致 double 翻页
+        await setReadingState({
+          emptyPageStallCount: stall,
+          emptyLastFingerprint: fp,
+          emptyLastTurnAt: now,
+          highlightMissStreak: 0,
+          pageTurnStreak: 0,
+        });
+        logEvent("background", `[koodo] 空页 ${same ? "无变化" : "有变化"}，停滞计数 ${stall}/${MAX_EMPTY_STALL}`, {
+          fingerprint: fp,
+        });
+        if (stall >= MAX_EMPTY_STALL) {
+          logEvent("background", "[koodo] 连续多次翻页内容无变化，判断已到书尾，停止朗读");
+          await stopReading();
+          return;
+        }
+        // 空页翻页就是"还在找下一章/下一页内容"：重置"没有等到下一章"的超时，
+        // 否则空页翻页耗时超过该窗口会被误判成"没有下一章"而提前停止。
+        // 书尾由上面的空页停滞判断兜底，这里只是把切章超时往后推。
+        if (state.waitingForNextChapter) {
+          logEvent("background", "[koodo] 空页翻页中，重置'等待下一章'超时");
+          armNextChapterTimeout(state.tabId);
+        }
+        chrome.tabs.sendMessage(state.tabId, { type: "KOODO_TURN_PAGE" }).catch(() => {});
+      })();
+      return;
+    }
+
+    case "KOODO_HIGHLIGHT_HIT": {
+      // content 高亮命中：未命中/翻页计数清零，恢复正常阅读
+      (async () => {
+        const state = await getReadingState();
+        if (state.highlightMissStreak || state.pageTurnStreak) {
+          await setReadingState({ highlightMissStreak: 0, pageTurnStreak: 0 });
+          logEvent("background", "[koodo] 高亮命中，未命中/翻页计数清零");
+        }
+      })();
+      return;
+    }
+
+    case "KOODO_HIGHLIGHT_MISS": {
+      (async () => {
+        const state = await getReadingState();
+        if (!state.isReading || !state.tabId) return;
+        const streak = (state.highlightMissStreak || 0) + 1;
+        if (streak < MAX_MISS_BEFORE_TURN) {
+          await setReadingState({ highlightMissStreak: streak });
+          logEvent("background", `[koodo] 高亮未命中 ${streak}/${MAX_MISS_BEFORE_TURN}，继续观察`);
+          return;
+        }
+        // 连续多个 chunk 未命中 → 翻页跳过（清零 streak，下一轮重新累计）
+        await setReadingState({ highlightMissStreak: 0 });
+        const turns = (state.pageTurnStreak || 0) + 1;
+        if (turns > MAX_PAGE_TURNS) {
+          logEvent("background", `[koodo] 已连续翻页 ${MAX_PAGE_TURNS} 次仍抓不到文本，停止朗读`);
+          await stopReading();
+          return;
+        }
+        await setReadingState({ pageTurnStreak: turns });
+        logEvent("background", `[koodo] 连续未命中，第 ${turns} 次翻页跳过`);
+        chrome.tabs.sendMessage(state.tabId, { type: "KOODO_TURN_PAGE" }).catch(() => {});
+      })();
+      return;
+    }
+
     case "HIGHLIGHT_CHUNK": {
       // offscreen 播到某一块时通知 background，background 再转发给
       // content-koodo.js 去做跨 iframe 边界的高亮定位。
@@ -326,15 +490,7 @@ export function handleKoodoMessage(message, sender, sendResponse) {
     logEvent("background", "[koodo] 本章读完，尝试切下一章");
     await setReadingState({ waitingForNextChapter: true });
     chrome.tabs.sendMessage(state.tabId, { type: "KOODO_NEXT_CHAPTER" }).catch(() => {});
-
-    const tabId = state.tabId;
-    setTimeout(async () => {
-      const s = await getReadingState();
-      if (s.isReading && s.waitingForNextChapter && s.tabId === tabId) {
-        logEvent("background", "[koodo] 没有等到下一章（可能已是最后一章），停止朗读");
-        await stopReading();
-      }
-    }, 8000);
+    armNextChapterTimeout(state.tabId);
   })();
   return;
 }
