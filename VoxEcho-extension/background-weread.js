@@ -172,7 +172,27 @@ async function startReading(tabId, voice, rate, { fromStart = false, prefixText 
   );
 
   try {
-    await sendToOffscreen({ type: "OFFSCREEN_PLAY", chunks: allChunks, voice, rate });
+    // 静音占位：把 \uE000 标记转换成 pause 对象（offscreen 播放时等待对应时长，不调用 TTS）
+    const PAUSE_MARKER = "\uE000";
+    const PAUSE_MS = 450;
+    const playChunks = [];
+    for (const chunk of allChunks) {
+      if (typeof chunk !== "string") { playChunks.push(chunk); continue; }
+      if (chunk.startsWith(PAUSE_MARKER)) {
+        const remaining = chunk.slice(PAUSE_MARKER.length);
+        playChunks.push({ type: "pause", durationMs: PAUSE_MS });
+        if (remaining) playChunks.push(remaining);
+      } else if (chunk.endsWith(PAUSE_MARKER)) {
+        const remaining = chunk.slice(0, -PAUSE_MARKER.length);
+        if (remaining) playChunks.push(remaining);
+        playChunks.push({ type: "pause", durationMs: PAUSE_MS });
+      } else if (chunk === PAUSE_MARKER) {
+        playChunks.push({ type: "pause", durationMs: PAUSE_MS });
+      } else {
+        playChunks.push(chunk);
+      }
+    }
+    await sendToOffscreen({ type: "OFFSCREEN_PLAY", chunks: playChunks, voice, rate });
   } catch (e) {
     return { ok: false, error: `无法连接朗读播放器：${e.message}` };
   }

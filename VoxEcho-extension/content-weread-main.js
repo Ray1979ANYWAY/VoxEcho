@@ -242,6 +242,26 @@
   function rebuildTextAndNotify() {
     if (charIndex.length === 0) return;
 
+    // 换章/重建时清理旧高亮，避免上一章的高亮 rect 残留到新页面
+    clearHighlight();
+
+    // 统计正文字号（出现频率最高的字号），用于标题行检测
+    const rebuildSizeCount = {};
+    for (let i = 0; i < Math.min(300, charIndex.length); i++) {
+      const c = charIndex[i];
+      if (c.isVirtual || c.canvasIdx === -1) continue;
+      const s = Math.round(c.size * 10) / 10;
+      rebuildSizeCount[s] = (rebuildSizeCount[s] || 0) + 1;
+    }
+    let bodySizeForTitle = 0;
+    let rebuildBodyCount = 0;
+    for (const s in rebuildSizeCount) {
+      if (rebuildSizeCount[s] > rebuildBodyCount) {
+        rebuildBodyCount = rebuildSizeCount[s];
+        bodySizeForTitle = parseFloat(s);
+      }
+    }
+
     // 重建前过滤过期字符：
     // 1. 归属已移除 canvas 的字符（翻页/换章时旧 canvas 被移除，其字符残留会导致文本污染）
     // 2. 上一轮重建插入的虚拟标题句号（本轮会按新布局重新插入）
@@ -320,13 +340,19 @@
       for (let i = lineStart; i < lineEnd; i++) {
         charIndexWithTitles.push(charIndex[i]);
       }
-      // 检测是否是标题行（比下一行大 20% 以上）
+      // 检测是否是标题行：用正文字号作为基准（比正文大20%以上），
+      // 而非只比下一行（多级标题时相邻标题字号接近，会漏判）
       if (lineEnd < charIndex.length) {
         const nextSize = charIndex[lineEnd].size;
-        if (lineSize > nextSize * 1.2) {
-          // 插入虚拟句号
+        const isTitleByNext = lineSize > nextSize * 1.2;
+        const isTitleByBody = bodySizeForTitle > 0 && lineSize > bodySizeForTitle * 1.2;
+        if (isTitleByNext || isTitleByBody) {
+          // 插入一个 \u0001 占位符（正文绝对不会出现的不可见控制字符），
+          // 构建 fullText 时替换为"。\uE000"：句号负责断句，\uE000 是私有区标记，
+          // background chunking 后会把它转成 pause chunk（静音占位），offscreen 播放时等待对应时长。
+          // isVirtual 标记确保每轮重建前被过滤，不会残留污染。
           charIndexWithTitles.push({
-            ch: "。",
+            ch: "\u0001",
             x: charIndex[lineEnd - 1].x,
             y: lineY,
             size: lineSize,
@@ -340,7 +366,7 @@
     }
     charIndex = charIndexWithTitles;
 
-    const canvasText = charIndex.map(function (c) { return c.ch; }).join("");
+    const canvasText = charIndex.map(function (c) { return c.ch === "\u0001" ? "。\uE000" : c.ch; }).join("");
     fullText = canvasText;
     domTextStart = -1;
 
@@ -547,6 +573,7 @@
     const baseCanvas = scrollMode ? canvasElements[0] : null;
 
     const createdRects = [];
+    let debugAnchorDrawn = false;
     // 逐字画矩形（和 DOM 逐字高亮视觉一致），不按行合并
     chars.forEach(function (c) {
       // 跳过虚拟句号（标题后插入的标点，没有实际渲染位置）
@@ -556,11 +583,16 @@
       if (!ov || !canvas) return;
       ov.syncSize();
       const ratio = logicalToCss(canvas, c.scaleX);
-      const cssX = c.x * ratio;
+      const sx = c.scaleX || 2;
+      const sy = c.scaleY || 2;
+      // 应用 ctx.translate() 的平移：tx/ty 是 getTransform() 的 e/f 分量（设备像素级别），
+      // 除以 scale 得到逻辑坐标平移。不同文章/章节的 translate 不同，这是换文章后高亮错位的根因。
+      const logicalX = c.x + (c.tx || 0) / sx;
+      const logicalY = c.y + (c.ty || 0) / sy;
+      const cssX = logicalX * ratio;
       const cssW = Math.max(c.size * ratio, 2);
-      // 基线偏移跟字号走：微信读书 textBaseline=middle，实际字符位置比计算的高一行
-      // 高亮垂直偏移校准：原 1.5*size 偏下半行，校准为 2.0*size；增大=上移，减小=下移
-      const cssY = (c.y - c.size * 2.0) * ratio;
+      // 高亮垂直偏移：textBaseline=middle，文字顶部 = 中点 - size*0.5
+      const cssY = (logicalY - c.size * 0.5) * ratio;
       const cssH = c.size * ratio;
       const rect = document.createElement("div");
       rect.style.cssText =
@@ -568,6 +600,28 @@
         "px;height:" + cssH + "px;background:rgba(255,215,0,0.2);border-radius:2px;";
       ov.el.appendChild(rect);
       createdRects.push(rect);
+
+      // === 诊断锚：对第一个高亮字符输出完整坐标链路 + 画红色参考框 ===
+      if (!debugAnchorDrawn) {
+        debugAnchorDrawn = true;
+        try {
+          const cr = canvas.getBoundingClientRect();
+          const or = ov.el.getBoundingClientRect();
+          const rectR = rect.getBoundingClientRect();
+          console.log("[VoxEcho][高亮诊断锚] char=" + JSON.stringify(c.ch) +
+            " fillText{x:" + Math.round(c.x) + ",y:" + Math.round(c.y) + ",size:" + c.size +
+            "} scale{sx:" + sx + ",sy:" + sy + "} translate{tx:" + (c.tx||0) + ",ty:" + (c.ty||0) +
+            "} logical{x:" + Math.round(logicalX) + ",y:" + Math.round(logicalY) +
+            "} ratio:" + ratio.toFixed(3) +
+            " css{x:" + Math.round(cssX) + ",y:" + Math.round(cssY) + ",w:" + Math.round(cssW) + ",h:" + Math.round(cssH) + "}" +
+            " canvasRect{top:" + Math.round(cr.top) + ",left:" + Math.round(cr.left) + ",w:" + Math.round(cr.width) + ",h:" + Math.round(cr.height) + "}" +
+            " overlayRect{top:" + Math.round(or.top) + ",left:" + Math.round(or.left) + ",w:" + Math.round(or.width) + ",h:" + Math.round(or.height) + "}" +
+            " rectActual{top:" + Math.round(rectR.top) + ",left:" + Math.round(rectR.left) + ",w:" + Math.round(rectR.width) + ",h:" + Math.round(rectR.height) + "}" +
+            " scrollY:" + Math.round(window.scrollY || 0));
+        } catch (e) {
+          console.log("[VoxEcho][高亮诊断锚] 异常:", e);
+        }
+      }
     });
 
     // 滚动模式：高亮不在视口内时，自动滚动到高亮位置
@@ -1043,11 +1097,26 @@
 
     let firstVisible = -1;
     let checked = 0;
-    // 智能跳过章节标题：先遍历前100个字符识别第一行和第二行的字体大小。
-    // 如果第一行明显大于第二行（>20%），视为章节标题跳过；否则（无标题章节）不跳过。
+    // 智能章节标题检测：用正文字号作为基准，而非只比第一行vs第二行。
+    // 先统计前200个字符的字号分布，找到出现频率最高的正文字号；
+    // 任何比正文字号大20%以上的行都是标题行（支持多级标题，如"三十而立"+"一"）。
+    const sizeCount = {};
+    for (let i = 0; i < Math.min(200, charIndex.length); i++) {
+      const c = charIndex[i];
+      if (c.isVirtual || c.canvasIdx === -1) continue;
+      const s = Math.round(c.size * 10) / 10;
+      sizeCount[s] = (sizeCount[s] || 0) + 1;
+    }
+    let bodySize = 0;
+    let bodySizeCount = 0;
+    for (const s in sizeCount) {
+      if (sizeCount[s] > bodySizeCount) {
+        bodySizeCount = sizeCount[s];
+        bodySize = parseFloat(s);
+      }
+    }
     let firstLineY = null;
     let firstLineSize = 0;
-    let secondLineSize = 0;
     let skipFirstLine = false;
     for (let i = 0; i < Math.min(100, charIndex.length); i++) {
       const c = charIndex[i];
@@ -1055,9 +1124,7 @@
       if (firstLineY === null) {
         firstLineY = c.y;
         firstLineSize = c.size;
-      } else if (secondLineSize === 0 && Math.abs(c.y - firstLineY) > 3) {
-        secondLineSize = c.size;
-        if (firstLineSize > secondLineSize * 1.2) skipFirstLine = true;
+        if (bodySize > 0 && firstLineSize > bodySize * 1.2) skipFirstLine = true;
         break;
       }
     }
@@ -1087,8 +1154,8 @@
         debugCoords.push({ i: i, ch: c.ch, canvasIdx: c.canvasIdx, y: Math.round(c.y), size: c.size, absTop: Math.round(charAbsTop), isTitle: skipFirstLine && Math.abs(c.y - firstLineY) < 3 });
       }
 
-      // 跳过章节标题行（如果识别到）
-      if (skipFirstLine && Math.abs(c.y - firstLineY) < 3) continue;
+      // 章节标题行不跳过：检测到 heading 时从标题首字开始读（划选逻辑），标题后有 \u0001 占位符产生停顿
+      // if (skipFirstLine && Math.abs(c.y - firstLineY) < 3) continue;
 
       if (charAbsTop >= scrollY - 5 && charAbsTop < scrollY + viewportH &&
           charAbsLeft >= -5 && charAbsLeft < viewportW + 5) {
@@ -1342,6 +1409,20 @@
       console.log("[VoxEcho] 视口定位未找到可见字符", JSON.stringify(debugInfo));
       window.postMessage({ source: SOURCE, type: "debug-info", result: debugInfo }, "*");
       return 0;
+    }
+
+    // 检测到章节标题行（heading）：从标题首字开始读（划选逻辑），不往后找标点
+    if (skipFirstLine && firstVisible >= 0) {
+      const okInfo = {
+        result: "ok-heading",
+        firstVisible: firstVisible,
+        firstChar: charIndex[firstVisible].ch,
+        charOffset: firstVisible,
+        heading: true,
+      };
+      console.log("[VoxEcho] 视口定位成功(章节标题，从标题开始读)", JSON.stringify(okInfo));
+      window.postMessage({ source: SOURCE, type: "debug-info", result: okInfo }, "*");
+      return firstVisible;
     }
 
     // skipPunct=true 时（翻页后）直接从视口第一个可见字符开始，不往后找标点
