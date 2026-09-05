@@ -6,7 +6,7 @@
 
 ## 1. 项目概览
 
-VoxEcho 是一款 Chrome 浏览器电子书朗读插件，支持 **Google Play Books** 与 **Koodo Reader（网页版）** 两个平台，支持中/英/西/日/韩五种语言的语音朗读。
+VoxEcho 是一款 Chrome 浏览器电子书朗读插件，支持 **Google Play Books**、**Koodo Reader（网页版）** 与 **微信读书（weread.qq.com）** 三个平台，支持中/英/西/日/韩五种语言的语音朗读。
 
 整体采用**「浏览器扩展 + 本地桥接服务」两段式架构**：
 
@@ -52,8 +52,11 @@ D:\Documents\VoxEcho\
     ├── background.js               # 唯一 service worker 入口（路由）
     ├── background-playbooks.js     # Play Books 朗读逻辑
     ├── background-koodo.js         # Koodo 朗读逻辑
+    ├── background-weread.js        # 微信读书朗读逻辑（空页翻页/标题页识别/书尾判断）
     ├── content-playbooks.js        # Play Books 正文提取
     ├── content-koodo.js            # Koodo 正文提取
+    ├── content-weread.js           # 微信读书 isolated world（消息转发/空页上报/翻页指令）
+    ├── content-weread-main.js      # 微信读书 main world（fillText hook 逐字采集/文本重建/高亮绘制）
     ├── chunking.js                 # 文本分块算法（平台无关）
     ├── offscreen.js                # 音频播放器
     ├── offscreen-client.js         # offscreen 生命周期管理
@@ -81,8 +84,11 @@ D:\Documents\VoxEcho\
 |------|------|
 | `background-playbooks.js` | Play Books 专属：文本提取结果缓存（`chrome.storage.session`）、朗读状态机、翻页等待/重试、内容对齐校验（防止缩水循环重播）、跨页残句（X 区）拼接、自动翻页上限控制 |
 | `background-koodo.js` | Koodo 专属：整章内容一次性提取完成，无翻页状态机，直接切块→发 offscreen 播放。当前已实现：整章缓存、从当前可见段开始朗读、暂停/继续/停止/语速/进度；高亮与自动翻章标注为后续待做 |
+| `background-weread.js` | 微信读书专属：canvas 渲染无 DOM 语义标签，通过 fillText hook 逐字采集文本。支持双栏/滚动两种排版模式。核心功能：文本重建与去重、翻页锚点搜索（片段搜索接续位置）、视口定位（跳过标题从正文第一句起读）、标题页识别（<30字无标点→不朗读继续翻页）、空页/插图页自动翻页（指纹比较判断书尾）、高亮状态机、静音占位（标题后450ms停顿） |
 | `content-playbooks.js` | 注入 Play Books 顶层页面与正文 iframe。从 DOM 按标签（`p, h1~h6`）提取正文段落，过滤分页延续箭头，合并被硬切的碎片段落；响应起点查询时优先用「用户鼠标选中的文字」定位朗读起点，无选中再回退到视口内第一个完整句子 |
 | `content-koodo.js` | 注入 Koodo 页面。因正文装在 `iframe#kookit-iframe`（sandbox 未开 allow-scripts，不能注入），只能从顶层页面跨边界读 `contentDocument`。检测整章刷新后重新提取，并定位视口内当前段作为朗读起点；同样支持「选中文字优先作为朗读起点」 |
+| `content-weread.js` | 注入微信读书页面（isolated world，document_start）。负责：main world 与 background 之间的消息转发、空页周期上报（每1s检测视口内有无可见字符）、翻页指令执行（PageDown/ArrowRight）、划选起点查询转发、高亮消息转发 |
+| `content-weread-main.js` | 注入微信读书页面（MAIN world，document_start）。核心：hook CanvasRenderingContext2D.fillText 逐字采集字符（记录x/y/size/font/transform/canvas元素引用），文本重建（排序/去重/标题行检测/虚拟句号插入），高亮绘制（离屏canvas measureText测实际字符宽度，应用ctx.transform的tx/ty，textBaseline=middle补偿），空页检测（视口内可见字符数），视口定位（正文字号众数基准识别标题行） |
 
 ### 3.3 平台无关共享模块
 
@@ -184,6 +190,14 @@ offscreen.js 播放 MP3；同时上报 HIGHLIGHT_CHUNK 高亮当前句
 | offscreen 被回收 | Chrome 会关闭长时间无声的 offscreen → 每次发送前重新确认存在，失败重建重试 |
 | onefile 图标 | PyInstaller `--icon` 会把完整 7 尺寸嵌入 exe（无"只嵌 16/32"限制）。**对 onefile 跑 rcedit/UpdateResource 会毁 PKG**；换图标唯一安全路径是 `tools/fix_exe_icon_safe.py`（注入后拼回 PKG） |
 | 任务栏发糊 | 曾因 launcher 的 `iconbitmap` 用 16px 小帧覆盖 `iconphoto` 高清帧导致；已修复为 iconbitmap 仅兜底 |
+| 微信读书 canvas 渲染 | 微信读书正文用 canvas 绘制，无 DOM 语义标签（p/h1等），无法用常规 DOM 提取。方案：MAIN world 注入 hook CanvasRenderingContext2D.fillText，逐字采集字符坐标/字号/字体/transform，重建文本。需注入两次：MAIN world（content-weread-main.js，document_start）hook fillText；isolated world（content-weread.js，document_start）转发消息 |
+| 文本污染修复 | 切章时微信读书替换 canvas 元素，旧 canvas 采集的字符未清理，canvasIdx 回收指向新 canvas，导致新旧字符混排（上一章句子被插到新章中间）。修复：fillText 采集记录 `el: canvas` 元素引用；canvasObserver 移除 canvas 时按 `c.el !== removedEl` 同步过滤字符；重建前过滤过期字符；排序 comparator 防御 |
+| 高亮坐标校准 | fillText 的 y 是 textBaseline=middle（文字中点），文字顶部 = y - size*0.5。必须应用 ctx.transform() 的 tx/ty 平移（之前忽略导致换文章后高亮错位）。高亮 cssY = (logicalY - size*0.5) * ratio，logicalY = c.y + c.ty/c.scaleY |
+| 西语/英语高亮重叠 | 中文等宽字符用 size 估算宽度准确，但西语/英语字符宽度不统一（i窄w宽），统一用 size 导致窄字符框太宽重叠。修复：离屏 canvas measureText 测每个字符实际宽度（带缓存，key=font+char），font 为空时回退到 size |
+| 空页检测：视口内可见字符 | 不能用全局 charIndex.length 判断空页——charIndex 是整章采集的（含视口外正文），即使当前页是纯插图，全局 charIndex 也可能 >0。改成统计当前视口内的可见字符数（应用 canvas transform + ratio 计算 absTop），只要视口内有一个可见字符就不是空页（保守判断） |
+| 标题页识别 | 微信读书无 heading 语义标签，标题页/封面页（如章节标题）会被误判为正文朗读。方案：background 侧判断新章节文本 <30字 且 无标点 = 标题页，不朗读，直接翻页继续找正文。正文字号基准（前200字符字号众数）识别标题行，插入虚拟句号分隔标题与正文 |
+| 书尾判断：指纹必须包含 URL | 空页翻页的书尾判断用指纹比较（连续4次无变化→书尾）。weread 是翻页模式，URL 每次翻页都会变，必须比较 `fp.url === last.url`。漏掉 URL 比较会导致连续插图页每次都被误判为"无变化"（textLen=0/canvasCount/scrollY 都相同），4次后误判为书尾。koodo 是滚动模式 URL 不变，用 imgCount/imgSrcs 判断内容变化 |
+| 排序性能：预缓存 canvas rect | charIndex.sort 的 comparator 里每次比较都调用 getBoundingClientRect() 会触发 reflow，大章节（5000-10000字符）排序比较约14万次，直接卡死主线程。修复：排序前预缓存所有 canvas 的 getBoundingClientRect() 到数组，comparator 直接用缓存，getBoundingClientRect 从28万次降到2次 |
 
 ---
 

@@ -3,6 +3,6 @@
     "message": "VoxEcho"
   },
   "pluginDesc": {
-    "message": "E-books朗读服务。仅支持网页版的Google Play Books与Koodo Reader。"
+    "message": "E-books朗读服务。支持网页版的Google Play Books、Koodo Reader与微信读书。"
   }
 }

@@ -51,6 +51,26 @@
     return r.width / logicalWidth;
   }
 
+  // 离屏 canvas 测量字符实际宽度（解决西语/英语字符宽度不统一导致高亮重叠）
+  // 中文等宽字符不受影响；i/l/j 窄字符和 m/w 宽字符用 measureText 精确测量
+  const _measureCanvas = document.createElement("canvas");
+  const _measureCtx = _measureCanvas.getContext("2d");
+  const _measureCache = new Map(); // key: font + "|" + ch, value: width (logical px)
+  function measureCharWidth(font, ch) {
+    if (!font || !ch) return 0;
+    const key = font + "|" + ch;
+    const cached = _measureCache.get(key);
+    if (cached !== undefined) return cached;
+    try {
+      _measureCtx.font = font;
+      const w = _measureCtx.measureText(ch).width;
+      _measureCache.set(key, w);
+      return w;
+    } catch (e) {
+      return 0;
+    }
+  }
+
   // ---------- fillText hook ----------
   function installFillTextHook() {
     const R = CanvasRenderingContext2D.prototype;
@@ -93,6 +113,7 @@
             y: y,
             size: size,
             ch: ch,
+            font: this.font || "",
             scaleX: transform.scaleX,
             scaleY: transform.scaleY,
             tx: transform.translateX,
@@ -285,12 +306,18 @@
     // - 双栏模式：两个 canvas 左右排列，left 不同，按 left 排序（左栏在前）
     // - 滚动模式：两个 canvas 上下排列，left 相同，按 top 排序（上面的在前）
     // - 同一 canvas 内按 y → x
+    // 性能优化：排序前缓存所有 canvas 的 getBoundingClientRect()，避免 comparator 内
+    // 每次比较都触发 reflow（N log N 次 reflow 会导致大章节页面卡死）。
+    const _canvasRects = canvasElements.map(function (c) {
+      try { return c.getBoundingClientRect(); } catch (e) { return null; }
+    });
     charIndex.sort(function (a, b) {
-      const ca = canvasElements[a.canvasIdx];
-      const cb = canvasElements[b.canvasIdx];
-      let leftA = 0, leftB = 0, topA = 0, topB = 0;
-      try { const ra = ca.getBoundingClientRect(); leftA = ra.left; topA = ra.top; } catch (e) { leftA = a.canvasIdx; }
-      try { const rb = cb.getBoundingClientRect(); leftB = rb.left; topB = rb.top; } catch (e) { leftB = b.canvasIdx; }
+      const ra = _canvasRects[a.canvasIdx];
+      const rb = _canvasRects[b.canvasIdx];
+      const leftA = ra ? ra.left : a.canvasIdx;
+      const leftB = rb ? rb.left : b.canvasIdx;
+      const topA = ra ? ra.top : 0;
+      const topB = rb ? rb.top : 0;
       if (Math.abs(leftA - leftB) > 2) return leftA - leftB;       // 双栏：左右
       if (Math.abs(topA - topB) > 2) return topA - topB;           // 滚动：上下
       if (Math.abs(a.y - b.y) > 3) return a.y - b.y;               // 同行
@@ -590,7 +617,11 @@
       const logicalX = c.x + (c.tx || 0) / sx;
       const logicalY = c.y + (c.ty || 0) / sy;
       const cssX = logicalX * ratio;
-      const cssW = Math.max(c.size * ratio, 2);
+      // 用离屏 canvas measureText 测字符实际宽度（西语/英语字符不等宽，统一用 size 会重叠）
+      // font 为空或测量失败时回退到 size*ratio（中文等宽场景）
+      const measuredW = c.font ? measureCharWidth(c.font, c.ch) : 0;
+      const charW = measuredW > 0 ? measuredW : c.size;
+      const cssW = Math.max(charW * ratio, 2);
       // 高亮垂直偏移：textBaseline=middle，文字顶部 = 中点 - size*0.5
       const cssY = (logicalY - c.size * 0.5) * ratio;
       const cssH = c.size * ratio;
@@ -1485,16 +1516,45 @@
   }
 
   // ---------- 空页指纹 ----------
-  // 只有当前页确实没有文本时才返回指纹；有文本时返回 null，
-  // content script 收到 null 就不上报 background，避免误触发翻页。
+  // 空页/插图页检测：判断当前视口内是否有可见字符。
+  // 只要视口内有一个可见字符就不是空页（保守判断，避免误判正文页）。
+  // 标题页（有标题文字但无正文）由 background 侧的 isTitleOrCoverPage 判断处理。
+  // 不能用全局 charIndex.length 判断——charIndex 是整章采集的（含视口外正文），
+  // 即使当前页是纯插图，全局 charIndex 也可能 >0，会被误判为"有文本"而不翻页。
   function getEmptyPageFingerprint() {
-    if (fullText.length > 0 || charIndex.length > 0) {
-      return null;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    const viewportH = window.innerHeight;
+    let hasVisibleChar = false;
+
+    // 预缓存 canvas rect，避免循环里重复 getBoundingClientRect
+    const canvasRects = canvasElements.map(function (c) {
+      try { return c.getBoundingClientRect(); } catch (e) { return null; }
+    });
+
+    for (let i = 0; i < charIndex.length; i++) {
+      const c = charIndex[i];
+      if (c.isVirtual || c.canvasIdx === -1) continue;
+      const cr = canvasRects[c.canvasIdx];
+      if (!cr) continue;
+      try {
+        const cv = canvasElements[c.canvasIdx];
+        const ratio = cr.width / (cv.width / (c.scaleX || 2));
+        const charAbsTop = cr.top + scrollY + (c.y + (c.ty || 0) / (c.scaleY || 2)) * ratio;
+        if (charAbsTop >= scrollY - 30 && charAbsTop < scrollY + viewportH + 30) {
+          hasVisibleChar = true;
+          break; // 只要有一个可见字符就不是空页，提前退出
+        }
+      } catch (e) {}
     }
+
+    if (hasVisibleChar) {
+      return null; // 有可见文本，不是空页
+    }
+
     return {
       textLen: 0,
       canvasCount: canvasElements.length,
-      scrollY: Math.round(window.scrollY || document.documentElement.scrollTop),
+      scrollY: Math.round(scrollY),
       url: location.href,
     };
   }

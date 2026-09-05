@@ -92,6 +92,8 @@ function ensurePrefetched() {
   const start = currentIndex + 1;
   const end = Math.min(currentIndex + PREFETCH_WINDOW, chunks.length - 1);
   for (let i = start; i <= end; i++) {
+    // pause 对象不需要预取（不调用 TTS 合成）
+    if (typeof chunks[i] === "object" && chunks[i] && chunks[i].type === "pause") continue;
     if (!pending.has(i)) {
       pending.set(
         i,
@@ -163,6 +165,24 @@ async function doAdvanceAndPlay(mySession) {
     return;
   }
   ranDry = false;
+
+  // pause 对象：等待对应时长，不调用 TTS 合成
+  const nextChunk = chunks[nextIndex];
+  if (typeof nextChunk === "object" && nextChunk && nextChunk.type === "pause") {
+    const pauseMs = nextChunk.durationMs || 450;
+    diagLog("chunk[" + nextIndex + "] pause " + pauseMs + "ms（标题后静音占位）");
+    await new Promise(function (r) { setTimeout(r, pauseMs); });
+    if (mySession !== sessionId) return;
+    currentIndex = nextIndex;
+    consecutiveFailures = 0;
+    chrome.runtime.sendMessage({ type: "HIGHLIGHT_CHUNK", text: "" });
+    if (currentIndex === 0) {
+      chrome.runtime.sendMessage({ type: "AUDIO_STARTED" });
+    }
+    ensurePrefetched();
+    advanceAndPlay(sessionId);
+    return;
+  }
 
   if (!pending.has(nextIndex)) {
     diagLog(`nextIndex=${nextIndex} 没有 pending 记录，补一次 fetch`);

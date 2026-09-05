@@ -255,6 +255,8 @@ export function handleWereadMessage(message, sender, sendResponse) {
         const oldChapter = await getChapterForTab(sender.tab.id);
         const oldText = oldChapter && oldChapter.data ? oldChapter.data.map((d) => d.text).join("") : "";
         const newText = message.data ? message.data.map((d) => d.text).join("") : "";
+        // 标题页/封面页判断：文本很短（<30字）且无标点，认为是标题页，不是真正的正文章节
+        const isTitleOrCoverPage = newText.length > 0 && newText.length < 30 && !/[。！？，；：、,.!?;:]/.test(newText);
         const isAppend = oldText.length > 0 && newText.length > oldText.length && newText.startsWith(oldText);
         const state = await getReadingState();
 
@@ -341,7 +343,7 @@ export function handleWereadMessage(message, sender, sendResponse) {
         }
 
         await saveChapterForTab(sender.tab.id, message.url, message.data);
-        if (state.tabId === sender.tab.id && message.data && message.data.length > 0) {
+        if (state.tabId === sender.tab.id && message.data && message.data.length > 0 && !isTitleOrCoverPage) {
           if (state.emptyLastFingerprint || state.emptyPageStallCount) {
             logEvent("background", "[weread] 采集到有文本章节，重置空页翻页状态");
             await setReadingState({ emptyPageStallCount: 0, emptyLastFingerprint: null });
@@ -392,6 +394,10 @@ export function handleWereadMessage(message, sender, sendResponse) {
               fromStart: true,
               prefixText: state.pendingTrailingText,
             });
+          } else if (isTitleOrCoverPage) {
+            // 标题页/封面页：不朗读，继续翻页找正文
+            logEvent("background", `[weread] 下一章是标题页/封面页(${newText.length}字，无标点)，继续翻页`);
+            chrome.tabs.sendMessage(sender.tab.id, { type: "WEREAD_TURN_PAGE" }).catch(() => {});
           } else {
             logEvent("background", `[weread] 下一章已采集 ${message.data.length} 段，从章首继续朗读`);
             await startReading(sender.tab.id, state.voice, state.rate, { fromStart: true });
@@ -500,7 +506,8 @@ export function handleWereadMessage(message, sender, sendResponse) {
           fp &&
           fp.textLen === last.textLen &&
           fp.canvasCount === last.canvasCount &&
-          Math.abs((fp.scrollY || 0) - (last.scrollY || 0)) < 2;
+          Math.abs((fp.scrollY || 0) - (last.scrollY || 0)) < 2 &&
+          fp.url === last.url;
         const stall = same ? (state.emptyPageStallCount || 0) + 1 : 0;
         await setReadingState({
           emptyPageStallCount: stall,
