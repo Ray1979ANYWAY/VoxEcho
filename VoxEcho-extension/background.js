@@ -9,9 +9,13 @@
 import { logEvent, exportDiagnosticLogText, diagnosticLogCount, clearDiagnosticLog } from "./diagnostics.js";
 import { handlePlaybooksMessage } from "./background-playbooks.js";
 import { handleKoodoMessage } from "./background-koodo.js";
+import { handleWereadMessage } from "./background-weread.js";
 
 function detectPlatformFromUrl(url) {
   if (!url) return null;
+  if (url.startsWith("https://weread.qq.com/")) {
+    return "weread";
+  }
   if (url.startsWith("https://web.koodoreader.com/") || url.startsWith("https://web.koodoreader.cn/")) {
     return "koodo";
   }
@@ -22,6 +26,9 @@ function detectPlatformFromUrl(url) {
 }
 
 function dispatch(platform, message, sender, sendResponse) {
+  if (platform === "weread") {
+    return handleWereadMessage(message, sender, sendResponse);
+  }
   if (platform === "koodo") {
     return handleKoodoMessage(message, sender, sendResponse);
   }

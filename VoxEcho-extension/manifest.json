@@ -13,6 +13,7 @@
     "https://books.googleusercontent.com/*",
     "https://web.koodoreader.com/*",
     "https://web.koodoreader.cn/*",
+    "https://weread.qq.com/*",
     "http://127.0.0.1:5005/*"
   ],
   "background": {
@@ -36,6 +37,21 @@
       ],
       "js": ["content-koodo.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://weread.qq.com/*"
+      ],
+      "js": ["content-weread-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://weread.qq.com/*"
+      ],
+      "js": ["content-weread.js"],
+      "run_at": "document_start"
     }
   ],
   "action": {

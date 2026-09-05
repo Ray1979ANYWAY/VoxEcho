@@ -456,6 +456,33 @@ const PINNED_LANGS = [
   { key: "ko", match: (bl) => bl.startsWith("ko") },
 ];
 
+// 音色区域优先级：同语言组内按国家/地区码优先排列（其余保持原顺序，稳定排序）。
+// 例：英语组内 en-US 排最前、en-GB（英音）次之；西语组内 es-ES（西班牙）排最前、es-MX 次之。
+const VOICE_REGION_PRIORITY = {
+  en: ["US", "GB"],
+  es: ["ES", "MX"],
+};
+
+// 提取音色 locale 的国家/地区码（"en-US" → "US"，"es-ES" → "ES"）
+function voiceRegion(v) {
+  const parts = String(v.locale || "").split("-");
+  return parts.length >= 2 ? parts[1].toUpperCase() : "";
+}
+
+// 按 VOICE_REGION_PRIORITY 对组内音色排序；未配置优先级的语言组原样返回。
+function sortVoicesForGroup(langKey, voices) {
+  const priority = VOICE_REGION_PRIORITY[langKey];
+  if (!priority || !voices || voices.length < 2) return voices;
+  return [...voices].sort((a, b) => {
+    const ia = priority.indexOf(voiceRegion(a));
+    const ib = priority.indexOf(voiceRegion(b));
+    if (ia === -1 && ib === -1) return 0; // 都不在优先级里，保持原相对顺序
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
 // 音色显示名：保留国家/地区后缀并带上性别前缀。例：en-GB-SoniaNeural(Female) → "Female · Sonia (en-GB)"、es-MX-DaliaNeural(Female) → "Femenina · Dalia (es-MX)"
 function voiceDisplayName(v) {
   const s = v.shortName || "";
@@ -542,7 +569,9 @@ function fillVoiceSelect() {
   const group = langGroups.find((g) => g.key === key);
   sel.innerHTML = "";
   if (!group) return;
-  for (const v of group.voices) {
+  // 音色选项按区域优先级排序（en 组 US→BR、es 组 ES→MX），其余保持原顺序
+  const sortedVoices = sortVoicesForGroup(key, group.voices);
+  for (const v of sortedVoices) {
     const opt = document.createElement("option");
     opt.value = v.shortName;
     opt.textContent = voiceDisplayName(v);
