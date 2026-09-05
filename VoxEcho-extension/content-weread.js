@@ -44,7 +44,7 @@
           url: d.url,
           data: [{ type: "body", text: d.text }],
         });
-        diagLog("main world 重建正文", { len: d.text.length, chars: d.charCount });
+        diagLog("main world 重建正文", { len: d.text.length, chars: d.charCount, firstTransform: d.firstTransform || null });
         break;
 
       case "highlight-hit":
@@ -67,6 +67,10 @@
         if (isReading && d.result) {
           safeSendMessage({ type: "WEREAD_EMPTY_PAGE", fingerprint: d.result });
         }
+        break;
+
+      case "debug-info":
+        diagLog("视口定位调试", d.result);
         break;
     }
   });
@@ -133,7 +137,7 @@
     switch (message.type) {
       case "WEREAD_GET_START_INDEX":
         pendingStartIndexCallback = sendResponse;
-        postToMain("get-start-index");
+        postToMain("get-start-index", { fromViewportStart: !!message.fromViewportStart });
         return true; // 异步回包
 
       case "WEREAD_TURN_PAGE":

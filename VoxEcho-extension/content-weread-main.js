@@ -1,4 +1,4 @@
-// ---- 微信读书 main world 脚本 ----
+﻿// ---- 微信读书 main world 脚本 ----
 // 在 manifest.json 中以 world: "MAIN" 注册，run_at: document_start。
 // 不受页面 CSP 限制，直接修改页面的 CanvasRenderingContext2D.prototype。
 // 负责：fillText hook、字符采集、坐标索引、覆盖层高亮。
@@ -10,7 +10,7 @@
   const SOURCE = "vox-weread-main";
   const CONTENT_SOURCE = "vox-weread-content";
 
-  let charIndex = [];       // [{canvasIdx, x, y, size, ch, scaleX, scaleY}]
+  let charIndex = [];       // [{canvasIdx, x, y, size, ch, scaleX, scaleY, tx, ty}]
   let fullText = "";
   let canvasElements = [];
   let overlays = [];
@@ -20,19 +20,24 @@
   // 绘制结束后静默多久认为一页完成（防抖）
   const REBUILD_DEBOUNCE_MS = 300;
 
-  // 缓存每个 canvas 的 scale，避免每次 fillText 都调用 getTransform()
-  const canvasScaleCache = new WeakMap();
+  // 缓存每个 canvas 的完整 transform，避免每次 fillText 都调用 getTransform()
+  const canvasTransformCache = new WeakMap();
 
-  function getContextScale(ctx, canvas) {
-    let cached = canvasScaleCache.get(canvas);
+  function getContextTransform(ctx, canvas) {
+    let cached = canvasTransformCache.get(canvas);
     if (!cached) {
       try {
         const t = ctx.getTransform();
-        cached = { scaleX: t.a || 1, scaleY: t.d || 1 };
+        cached = {
+          scaleX: t.a || 1,
+          scaleY: t.d || 1,
+          translateX: t.e || 0,
+          translateY: t.f || 0,
+        };
       } catch (e) {
-        cached = { scaleX: 2, scaleY: 2 }; // 微信读书默认 scale(2,2)
+        cached = { scaleX: 2, scaleY: 2, translateX: 0, translateY: 0 };
       }
-      canvasScaleCache.set(canvas, cached);
+      canvasTransformCache.set(canvas, cached);
     }
     return cached;
   }
@@ -77,7 +82,7 @@
 
         const str = String(text);
         const size = parseFloat(((this.font || "").match(/(\d+(?:\.\d+)?)px/) || [])[1]) || 16;
-        const scale = getContextScale(this, canvas);
+        const transform = getContextTransform(this, canvas);
 
         for (let i = 0; i < str.length; i++) {
           const ch = str[i];
@@ -88,8 +93,11 @@
             y: y,
             size: size,
             ch: ch,
-            scaleX: scale.scaleX,
-            scaleY: scale.scaleY,
+            scaleX: transform.scaleX,
+            scaleY: transform.scaleY,
+            tx: transform.translateX,
+            ty: transform.translateY,
+            el: canvas,
           });
         }
       } catch (e) {
@@ -100,32 +108,79 @@
 
     console.log("[VoxEcho] fillText hook installed (debounce 300ms + clearRect/width new-page detection)");
 
-    // hook clearRect：只清空对应 canvas 的字符，不影响另一栏
+    // hook clearRect：区分模式
+    // - 滚动模式：任何 clearRect 都清空全部字符（虚拟滚动重绘，旧内容已失效）
+    // - 双栏模式：只清空对应 canvas 的字符（左右栏独立，清除右栏不影响左栏）
     const origClearRect = R.clearRect;
     R.clearRect = function (x, y, w, h) {
       try {
         const canvas = this.canvas;
-        if (canvas) {
-          const idx = canvasElements.indexOf(canvas);
-          if (idx !== -1 && charIndex.some(function (c) { return c.canvasIdx === idx; })) {
-            charIndex = charIndex.filter(function (c) { return c.canvasIdx !== idx; });
-            if (rebuildTimer) { clearTimeout(rebuildTimer); rebuildTimer = null; }
+        if (canvas && charIndex.length > 0) {
+          const isScroll = document.documentElement.scrollHeight > document.documentElement.clientHeight + 100;
+          if (isScroll) {
+            charIndex = [];
+          } else {
+            const idx = canvasElements.indexOf(canvas);
+            if (idx !== -1 && charIndex.some(function (c) { return c.canvasIdx === idx; })) {
+              charIndex = charIndex.filter(function (c) { return c.canvasIdx !== idx; });
+            }
           }
+          if (rebuildTimer) { clearTimeout(rebuildTimer); rebuildTimer = null; }
         }
       } catch (e) {}
       return origClearRect.apply(this, arguments);
     };
 
-    // hook canvas.width 重置：只清空对应 canvas 的字符
+    // hook fillRect：检测整画布不透明填充（微信读书切章时用白底 fillRect 覆盖整个画布来清屏，
+    // 而不是 clearRect 或 canvas.width 重置）。整画布 + 不透明填充色 = 清屏，执行和 clearRect 一样的清理。
+    const origFillRect = R.fillRect;
+    R.fillRect = function (x, y, w, h) {
+      try {
+        const canvas = this.canvas;
+        if (canvas && charIndex.length > 0) {
+          const cw = canvas.width;
+          const ch = canvas.height;
+          // 整画布覆盖：x<=0, y<=0, w>=画布宽, h>=画布高
+          const isFullCanvas = (x <= 0 && y <= 0 && w >= cw && h >= ch);
+          if (isFullCanvas) {
+            // 填充色不透明判断：不是 rgba，或 rgba 的 alpha=1
+            const fs = String(this.fillStyle || "");
+            const isOpaque = (!fs.startsWith("rgba")) || (fs.indexOf(",1)") !== -1) || (fs.indexOf(", 1)") !== -1);
+            if (isOpaque) {
+              const isScroll = document.documentElement.scrollHeight > document.documentElement.clientHeight + 100;
+              if (isScroll) {
+                charIndex = [];
+              } else {
+                const idx = canvasElements.indexOf(canvas);
+                if (idx !== -1 && charIndex.some(function (c) { return c.canvasIdx === idx; })) {
+                  charIndex = charIndex.filter(function (c) { return c.canvasIdx !== idx; });
+                }
+              }
+              if (rebuildTimer) { clearTimeout(rebuildTimer); rebuildTimer = null; }
+            }
+          }
+        }
+      } catch (e) {}
+      return origFillRect.apply(this, arguments);
+    };
+
+    // hook canvas.width 重置：同样区分模式
     const canvasWidthDesc = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, "width");
     if (canvasWidthDesc && typeof canvasWidthDesc.set === "function") {
       const origWidthSet = canvasWidthDesc.set;
       Object.defineProperty(HTMLCanvasElement.prototype, "width", {
         set: function (v) {
           try {
-            const idx = canvasElements.indexOf(this);
-            if (idx !== -1 && charIndex.some(function (c) { return c.canvasIdx === idx; })) {
-              charIndex = charIndex.filter(function (c) { return c.canvasIdx !== idx; });
+            if (charIndex.length > 0) {
+              const isScroll = document.documentElement.scrollHeight > document.documentElement.clientHeight + 100;
+              if (isScroll) {
+                charIndex = [];
+              } else {
+                const idx = canvasElements.indexOf(this);
+                if (idx !== -1 && charIndex.some(function (c) { return c.canvasIdx === idx; })) {
+                  charIndex = charIndex.filter(function (c) { return c.canvasIdx !== idx; });
+                }
+              }
               if (rebuildTimer) { clearTimeout(rebuildTimer); rebuildTimer = null; }
             }
           } catch (e) {}
@@ -135,40 +190,238 @@
         configurable: true,
       });
     }
+
   }
 
   // ---------- 文本重建 ----------
+
+  // 从 SPAN.wr_absolute 提取 DOM 文本（滚动模式下后半部分正文用 DOM 渲染）
+  // 直接按排序后的 span 逐个拼接，确保文本顺序和 getSortedDomSpans() 的索引严格对应
+  function extractDomText() {
+    const sorted = getSortedDomSpans();
+    if (sorted.length === 0) return "";
+    return sorted.map(function (s) { return s.text; }).join("");
+  }
+
+  // 获取排序后的 SPAN.wr_absolute 元素列表（用于 DOM 高亮）
+  function getSortedDomSpans() {
+    try {
+      const spans = document.querySelectorAll("span.wr_absolute");
+      if (spans.length === 0) return [];
+      const all = [];
+      for (let i = 0; i < spans.length; i++) {
+        const el = spans[i];
+        const txt = (el.textContent || "").trim();
+        if (!txt) continue;
+        const r = el.getBoundingClientRect();
+        all.push({ text: txt, top: Math.round(r.top), left: Math.round(r.left), el: el });
+      }
+      all.sort(function (a, b) { return a.top - b.top || a.left - b.left; });
+      return all;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // 清除 DOM 高亮（移除所有 span 的背景色）
+  function clearDomHighlight() {
+    try {
+      const spans = document.querySelectorAll("span.wr_absolute");
+      for (let i = 0; i < spans.length; i++) {
+        spans[i].style.backgroundColor = "";
+        spans[i].style.borderRadius = "";
+      }
+    } catch (e) {}
+  }
+
+  // DOM 文本在合并后 fullText 中的起始位置（用于高亮时区分 canvas 部分和 DOM 部分）
+  let domTextStart = -1;
+
+  let domRetryCount = 0;
+  let domRenderMonitor = null; // 滚动模式下监听 DOM 延迟渲染
   function rebuildTextAndNotify() {
     if (charIndex.length === 0) return;
 
-    // 排序：canvas 水平位置（左栏在前）→ y → x
-    // 用 getBoundingClientRect().left 而非 offsetLeft，布局未完成时更准；
-    // 两个 canvas left 相同时用 canvasIdx 兜底，避免左右栏同一行 x 重叠导致交错。
+    // 重建前过滤过期字符：
+    // 1. 归属已移除 canvas 的字符（翻页/换章时旧 canvas 被移除，其字符残留会导致文本污染）
+    // 2. 上一轮重建插入的虚拟标题句号（本轮会按新布局重新插入）
+    // 3. canvasIdx 悬空的字符（超出当前 canvasElements 范围）
+    const beforeFilterLen = charIndex.length;
+    charIndex = charIndex.filter(function (c) {
+      if (c.el && canvasElements.indexOf(c.el) === -1) return false;
+      if (c.isVirtual) return false;
+      if (c.canvasIdx < 0 || c.canvasIdx >= canvasElements.length) return false;
+      return true;
+    });
+    if (charIndex.length === 0) {
+      console.log("[VoxEcho] 重建前过滤后为空，等待下一轮 fillText");
+      return;
+    }
+    if (charIndex.length < beforeFilterLen) {
+      console.log("[VoxEcho] 重建前过滤过期字符: " + beforeFilterLen + " -> " + charIndex.length);
+    }
+
+    // 排序：
+    // - 双栏模式：两个 canvas 左右排列，left 不同，按 left 排序（左栏在前）
+    // - 滚动模式：两个 canvas 上下排列，left 相同，按 top 排序（上面的在前）
+    // - 同一 canvas 内按 y → x
     charIndex.sort(function (a, b) {
       const ca = canvasElements[a.canvasIdx];
       const cb = canvasElements[b.canvasIdx];
-      let leftA = 0, leftB = 0;
-      try { leftA = ca ? ca.getBoundingClientRect().left : a.canvasIdx; } catch (e) { leftA = a.canvasIdx; }
-      try { leftB = cb ? cb.getBoundingClientRect().left : b.canvasIdx; } catch (e) { leftB = b.canvasIdx; }
-      if (Math.abs(leftA - leftB) > 2) return leftA - leftB;
-      if (a.canvasIdx !== b.canvasIdx) return a.canvasIdx - b.canvasIdx; // 同位置时 canvasIdx 兜底
-      if (Math.abs(a.y - b.y) > 3) return a.y - b.y;
+      let leftA = 0, leftB = 0, topA = 0, topB = 0;
+      try { const ra = ca.getBoundingClientRect(); leftA = ra.left; topA = ra.top; } catch (e) { leftA = a.canvasIdx; }
+      try { const rb = cb.getBoundingClientRect(); leftB = rb.left; topB = rb.top; } catch (e) { leftB = b.canvasIdx; }
+      if (Math.abs(leftA - leftB) > 2) return leftA - leftB;       // 双栏：左右
+      if (Math.abs(topA - topB) > 2) return topA - topB;           // 滚动：上下
+      if (Math.abs(a.y - b.y) > 3) return a.y - b.y;               // 同行
       return a.x - b.x;
     });
 
-    fullText = charIndex.map(function (c) { return c.ch; }).join("");
+    // 去重：canvas 重绘时每个字可能被 fillText 两次（双缓冲/重绘机制），
+    // 同一个 canvasIdx + x + y + ch 只保留一个。叠词的 x 不同不会被误删。
+    const seen = {};
+    const deduped = [];
+    for (let i = 0; i < charIndex.length; i++) {
+      const c = charIndex[i];
+      const key = c.canvasIdx + "_" + Math.round(c.x) + "_" + Math.round(c.y) + "_" + c.ch;
+      if (!seen[key]) {
+        seen[key] = true;
+        deduped.push(c);
+      }
+    }
+    if (deduped.length < charIndex.length) {
+      console.log("[VoxEcho] charIndex 去重: " + charIndex.length + " → " + deduped.length);
+    }
+    charIndex = deduped;
+
+    // 调试：输出排序后前20个字符
+    try {
+      const debugSort = charIndex.slice(0, 20).map(function(c, i) {
+        const cv = canvasElements[c.canvasIdx];
+        let cvTop = -1;
+        try { cvTop = Math.round(cv.getBoundingClientRect().top); } catch (e) {}
+        return { i: i, canvasIdx: c.canvasIdx, cvTop: cvTop, y: Math.round(c.y), x: Math.round(c.x), ch: c.ch };
+      });
+      window.postMessage({ source: SOURCE, type: "debug-info", result: { sortDebug: debugSort } }, "*");
+    } catch (e) {}
+
+    // 按行检测标题：如果某行字体明显比下一行大（>20%），视为标题行，在末尾插入句号，
+    // 使 chunking 在标题后分段，朗读时有停顿。在 charIndex 里插入虚拟字符保持索引一致。
+    const charIndexWithTitles = [];
+    let lineStart = 0;
+    while (lineStart < charIndex.length) {
+      const lineY = charIndex[lineStart].y;
+      const lineSize = charIndex[lineStart].size;
+      let lineEnd = lineStart;
+      while (lineEnd < charIndex.length && Math.abs(charIndex[lineEnd].y - lineY) < 3) {
+        lineEnd++;
+      }
+      // 把当前行的字符加入
+      for (let i = lineStart; i < lineEnd; i++) {
+        charIndexWithTitles.push(charIndex[i]);
+      }
+      // 检测是否是标题行（比下一行大 20% 以上）
+      if (lineEnd < charIndex.length) {
+        const nextSize = charIndex[lineEnd].size;
+        if (lineSize > nextSize * 1.2) {
+          // 插入虚拟句号
+          charIndexWithTitles.push({
+            ch: "。",
+            x: charIndex[lineEnd - 1].x,
+            y: lineY,
+            size: lineSize,
+            canvasIdx: -1,
+            scaleX: charIndex[lineStart].scaleX || 2,
+            isVirtual: true,
+          });
+        }
+      }
+      lineStart = lineEnd;
+    }
+    charIndex = charIndexWithTitles;
+
+    const canvasText = charIndex.map(function (c) { return c.ch; }).join("");
+    fullText = canvasText;
+    domTextStart = -1;
+
+    // 滚动模式：canvas 只覆盖前半部分，后半部分是 DOM 渲染的 SPAN.wr_absolute
+    // 把 DOM 文本合并进 fullText，使视口定位能搜索到当前视口的文本
+    const isScroll = document.documentElement.scrollHeight > document.documentElement.clientHeight + 100;
+    if (isScroll) {
+      const domSpans = document.querySelectorAll("span.wr_absolute");
+      const domText = extractDomText();
+      console.log("[VoxEcho] 滚动模式DOM探测: spanCount=" + domSpans.length + " domTextLen=" + (domText ? domText.length : 0) + " retry=" + domRetryCount);
+      if (domText && domText.length > 10) {
+        domRetryCount = 0; // 重置重试计数
+        // 找 DOM 文本前 10 个字在 canvas 文本里的位置（处理重叠）
+        let overlapPos = -1;
+        for (let len = Math.min(domText.length, 12); len >= 4; len--) {
+          const snippet = domText.slice(0, len);
+          overlapPos = canvasText.indexOf(snippet);
+          if (overlapPos !== -1) break;
+        }
+        if (overlapPos !== -1) {
+          // 有重叠：canvas 文本截断到重叠位置，再拼接 DOM 文本
+          fullText = canvasText.slice(0, overlapPos) + domText;
+          domTextStart = overlapPos;
+          console.log("[VoxEcho] 合并DOM文本: canvasLen=" + canvasText.length +
+            " domLen=" + domText.length + " overlapPos=" + overlapPos +
+            " mergedLen=" + fullText.length);
+        } else {
+          // 无重叠：直接拼接（可能有少量重复或遗漏）
+          fullText = canvasText + domText;
+          domTextStart = canvasText.length;
+          console.log("[VoxEcho] 拼接DOM文本(无重叠): canvasLen=" + canvasText.length +
+            " domLen=" + domText.length + " mergedLen=" + fullText.length);
+        }
+      } else if (domRetryCount < 3) {
+        // DOM 还没渲染，延迟 500ms 重试（翻页后 canvas 重绘快，DOM 渲染有延迟）
+        domRetryCount++;
+        console.log("[VoxEcho] DOM未渲染，500ms后重试 (第" + domRetryCount + "次)");
+        setTimeout(rebuildTextAndNotify, 500);
+        return;
+      } else {
+        domRetryCount = 0; // 重试耗尽，重置
+        console.log("[VoxEcho] DOM重试耗尽，使用纯canvas文本");
+      }
+    }
 
     if (fullText.length > 0) {
+      const firstChar = charIndex.length > 0 ? charIndex[0] : null;
       console.log("[VoxEcho] 重建正文 len=" + fullText.length +
         " 前20字=" + fullText.slice(0, 20) +
-        " canvas数=" + canvasElements.length);
+        " canvas数=" + canvasElements.length +
+        (domTextStart >= 0 ? " domTextStart=" + domTextStart : "") +
+        (firstChar ? " firstTransform{tx:" + (firstChar.tx || 0) + ",ty:" + (firstChar.ty || 0) + "}" : ""));
       window.postMessage({
         source: SOURCE,
         type: "chapter-updated",
         url: location.href,
         text: fullText,
         charCount: charIndex.length,
+        firstTransform: firstChar ? { tx: firstChar.tx || 0, ty: firstChar.ty || 0 } : null,
       }, "*");
+    }
+
+    // 滚动模式下如果当前是纯 canvas（domTextStart=-1），定期检查 DOM 是否渲染出来。
+    // 翻页后 canvas 先重绘，DOM span 可能延迟渲染；DOM 渲染后重新合并，高亮就能切到 DOM 模式。
+    if (isScroll && domTextStart === -1 && !domRenderMonitor) {
+      let monitorCount = 0;
+      domRenderMonitor = setInterval(function () {
+        monitorCount++;
+        const spans = document.querySelectorAll("span.wr_absolute");
+        if (spans.length > 0) {
+          console.log("[VoxEcho] DOM渲染监听: 检测到" + spans.length + "个span，重新合并文本");
+          clearInterval(domRenderMonitor);
+          domRenderMonitor = null;
+          rebuildTextAndNotify();
+        } else if (monitorCount >= 10) {
+          // 最多检查10次（约10秒），超时停止
+          console.log("[VoxEcho] DOM渲染监听: 超时未检测到DOM，停止监听");
+          clearInterval(domRenderMonitor);
+          domRenderMonitor = null;
+        }
+      }, 1000);
     }
   }
 
@@ -198,6 +451,7 @@
 
   function clearHighlight() {
     overlays.forEach(function (o) { if (o && o.el) o.el.innerHTML = ""; });
+    clearDomHighlight();
   }
 
   // ---------- 高亮 ----------
@@ -206,13 +460,12 @@
       window.postMessage({ source: SOURCE, type: "highlight-miss" }, "*");
       return;
     }
+
     clearHighlight();
 
-    // chunk 是从 fullText 切出来的，直接 indexOf 即可；
-    // 不要用去空白后的 norm 位置去 slice charIndex，会导致索引错位。
+    // chunk 是从 fullText 切出来的，直接 indexOf 即可
     let pos = fullText.indexOf(text);
     if (pos === -1) {
-      // 兜底：去掉首尾空白后再试
       pos = fullText.indexOf(text.trim());
     }
     if (pos === -1) {
@@ -220,43 +473,170 @@
       return;
     }
 
-    const endPos = Math.min(pos + text.length, charIndex.length);
-    const chars = charIndex.slice(pos, endPos);
+    const endPos = Math.min(pos + text.length, fullText.length);
+
+    // DOM 部分高亮：如果 chunk 完全在 DOM 文本区域（pos >= domTextStart），
+    // 直接给对应的 SPAN.wr_absolute 加背景色
+    if (domTextStart >= 0 && pos >= domTextStart) {
+      const sortedSpans = getSortedDomSpans();
+      if (sortedSpans.length === 0) {
+        window.postMessage({ source: SOURCE, type: "highlight-miss" }, "*");
+        return;
+      }
+      // 字符偏移 → span 索引（有些 span 包含多个字，不能直接用字符偏移当 span 索引）
+      const domCharOffset = pos - domTextStart;
+      const domCharEnd = endPos - domTextStart;
+      let startSpanIdx = -1;
+      let endSpanIdx = -1;
+      let charCount = 0;
+      for (let i = 0; i < sortedSpans.length; i++) {
+        const spanLen = sortedSpans[i].text.length;
+        if (startSpanIdx === -1 && charCount + spanLen > domCharOffset) {
+          startSpanIdx = i;
+        }
+        if (charCount + spanLen >= domCharEnd) {
+          endSpanIdx = i + 1;
+          break;
+        }
+        charCount += spanLen;
+      }
+      if (startSpanIdx === -1) {
+        window.postMessage({ source: SOURCE, type: "highlight-miss" }, "*");
+        return;
+      }
+      if (endSpanIdx === -1) endSpanIdx = sortedSpans.length;
+      const highlighted = [];
+      for (let i = startSpanIdx; i < endSpanIdx && i < sortedSpans.length; i++) {
+        sortedSpans[i].el.style.backgroundColor = "rgba(255,215,0,0.2)";
+        sortedSpans[i].el.style.borderRadius = "3px";
+        highlighted.push(sortedSpans[i].el);
+      }
+      // 自动滚动到高亮位置
+      if (highlighted.length > 0 && isScrollMode()) {
+        const first = highlighted[0].getBoundingClientRect();
+        const viewportH = window.innerHeight;
+        if (first.top < 80 || first.top > viewportH - 40) {
+          const scrollDelta = first.top - 80;
+          if (Math.abs(scrollDelta) > 5) {
+            window.scrollBy(0, scrollDelta);
+          }
+        }
+      }
+      window.postMessage({ source: SOURCE, type: "highlight-hit" }, "*");
+      return;
+    }
+
+    // Canvas 部分高亮：用 charIndex + overlay
+    // 保护：charIndex 只覆盖 canvas 部分，如果 chunk 超出 charIndex 范围，只高亮 canvas 部分
+    if (pos >= charIndex.length) {
+      window.postMessage({ source: SOURCE, type: "highlight-miss" }, "*");
+      return;
+    }
+
+    const canvasEndPos = Math.min(endPos, charIndex.length);
+    const chars = charIndex.slice(pos, canvasEndPos);
     if (chars.length === 0) {
       window.postMessage({ source: SOURCE, type: "highlight-miss" }, "*");
       return;
     }
 
-    const groups = {};
-    chars.forEach(function (c) {
-      const key = c.canvasIdx + "_" + Math.round(c.y);
-      if (!groups[key]) groups[key] = { canvasIdx: c.canvasIdx, y: c.y, chars: [] };
-      groups[key].chars.push(c);
-    });
+    // 滚动模式：两个 canvas 共用全局坐标系，所有高亮统一画在第一个 canvas 的 overlay 上
+    // 双栏模式：各自 canvas 独立坐标系，画在各自 overlay 上
+    const scrollMode = isScrollMode();
+    const baseOv = scrollMode ? overlays[0] : null;
+    const baseCanvas = scrollMode ? canvasElements[0] : null;
 
-    Object.keys(groups).forEach(function (key) {
-      const g = groups[key];
-      const first = g.chars[0];
-      const last = g.chars[g.chars.length - 1];
-      const ov = overlays[g.canvasIdx];
-      const canvas = canvasElements[g.canvasIdx];
+    const createdRects = [];
+    // 逐字画矩形（和 DOM 逐字高亮视觉一致），不按行合并
+    chars.forEach(function (c) {
+      // 跳过虚拟句号（标题后插入的标点，没有实际渲染位置）
+      if (c.isVirtual || c.canvasIdx === -1) return;
+      const ov = scrollMode ? baseOv : overlays[c.canvasIdx];
+      const canvas = scrollMode ? baseCanvas : canvasElements[c.canvasIdx];
       if (!ov || !canvas) return;
       ov.syncSize();
-      // fillText 的 x/y 是逻辑坐标（ctx.scale 后的坐标），
-      // 用 logicalToCss 转成覆盖层的 CSS 坐标，不能直接用 canvas.width 除
-      const ratio = logicalToCss(canvas, first.scaleX);
-      const cssX = first.x * ratio;
-      const cssW = Math.max((last.x + last.size - first.x) * ratio, 2);
-      const cssY = (first.y - first.size / 2) * ratio;
-      const cssH = first.size * ratio;
+      const ratio = logicalToCss(canvas, c.scaleX);
+      const cssX = c.x * ratio;
+      const cssW = Math.max(c.size * ratio, 2);
+      // 基线偏移跟字号走：微信读书 textBaseline=middle，实际字符位置比计算的高一行
+      // 高亮垂直偏移校准：原 1.5*size 偏下半行，校准为 2.0*size；增大=上移，减小=下移
+      const cssY = (c.y - c.size * 2.0) * ratio;
+      const cssH = c.size * ratio;
       const rect = document.createElement("div");
       rect.style.cssText =
         "position:absolute;left:" + cssX + "px;top:" + cssY + "px;width:" + cssW +
-        "px;height:" + cssH + "px;background:rgba(255,215,0,0.2);border-radius:3px;";
+        "px;height:" + cssH + "px;background:rgba(255,215,0,0.2);border-radius:2px;";
       ov.el.appendChild(rect);
+      createdRects.push(rect);
     });
 
+    // 滚动模式：高亮不在视口内时，自动滚动到高亮位置
+    // 无论高亮在视口上方还是下方，都滚到高亮第一行可见的位置
+    if (createdRects.length > 0 && isScrollMode()) {
+      // 按 top 排序，取最上面的高亮矩形（Object.keys 遍历顺序不保证按 y 排序）
+      createdRects.sort(function (a, b) {
+        return a.getBoundingClientRect().top - b.getBoundingClientRect().top;
+      });
+      const firstRect = createdRects[0];
+      const fr = firstRect.getBoundingClientRect();
+      const viewportH = window.innerHeight;
+      if (fr.top < 80 || fr.bottom > viewportH - 40) {
+        const scrollDelta = fr.top - 80;
+        if (Math.abs(scrollDelta) > 5) {
+          window.scrollBy(0, scrollDelta);
+        }
+      }
+
+      // 方案1+3：滚动到目标位置后，假滚动触发微信读书的 DOM 实例化，
+      // 等 DOM 渲染出来后切换到 DOM 逐字高亮（和起读时一致）
+      const chunkText = text;
+      setTimeout(function () {
+        // 假滚动 1px 触发视口驱动的 DOM 渲染
+        window.scrollBy(0, 1);
+        window.scrollBy(0, -1);
+        setTimeout(function () {
+          const spans = document.querySelectorAll("span.wr_absolute");
+          window.postMessage({
+            source: SOURCE, type: "debug-info",
+            result: { domHydrationCheck: { spanCount: spans.length, domTextStart: domTextStart } },
+          }, "*");
+          if (spans.length > 0 && domTextStart === -1) {
+            // 重新合并 DOM 文本
+            const domText = extractDomText();
+            if (domText && domText.length > 10) {
+              const canvasText = charIndex.map(function (c) { return c.ch; }).join("");
+              let overlapPos = -1;
+              for (let len = Math.min(domText.length, 12); len >= 4; len--) {
+                overlapPos = canvasText.indexOf(domText.slice(0, len));
+                if (overlapPos !== -1) break;
+              }
+              if (overlapPos !== -1) {
+                fullText = canvasText.slice(0, overlapPos) + domText;
+                domTextStart = overlapPos;
+              } else {
+                fullText = canvasText + domText;
+                domTextStart = canvasText.length;
+              }
+              window.postMessage({
+                source: SOURCE, type: "debug-info",
+                result: { domHydration: "switched-to-dom", domTextStart: domTextStart, fullTextLen: fullText.length },
+              }, "*");
+              // 清除 canvas overlay，重新用 DOM 高亮
+              overlays.forEach(function (o) { if (o && o.el) o.el.innerHTML = ""; });
+              highlightChunk(chunkText);
+              return;
+            }
+          }
+        }, 300);
+      }, 200);
+    }
+
     window.postMessage({ source: SOURCE, type: "highlight-hit" }, "*");
+  }
+
+  // 判断是否为滚动模式（页面有纵向滚动条）
+  function isScrollMode() {
+    return document.documentElement.scrollHeight > document.documentElement.clientHeight + 100;
   }
 
   // ---------- 起始位置定位 ----------
@@ -271,21 +651,132 @@
   let mouseDownPos = null;
   let selectionStartCharIdx = null;
 
-  // 用视口坐标在 charIndex 里找对应字符的索引
+  // 用视口坐标在 charIndex 或 DOM span 里找对应字符的索引
+  // 重要：返回的索引必须和 fullText 的索引一致
+  // 滚动模式下，一次调用 getSortedDomSpans()，用同一批 span 既拼接 domText 又找鼠标位置
   function findCharAtPosition(clientX, clientY) {
+    const scrollMode = isScrollMode();
+
+    // 滚动模式下优先在 DOM span 里找
+    const sm = isScrollMode();
+    const debugMsg = { type: "findChar-debug", scrollMode: sm, mouseX: clientX, mouseY: clientY };
+    if (sm) {
+      // 一次获取排序后的 span，用同一批数据既合并文本又找位置
+      const sortedSpans = getSortedDomSpans();
+      debugMsg.spanCount = sortedSpans.length;
+      if (sortedSpans.length > 0) {
+        // 用这批 span 拼接 domText 并合并，同时记录每个 span 的起始字符位置
+        const domTextParts = [];
+        const spanCharOffsets = []; // spanCharOffsets[i] = 第 i 个 span 在 domText 中的起始字符位置
+        let charPos = 0;
+        for (let i = 0; i < sortedSpans.length; i++) {
+          spanCharOffsets.push(charPos);
+          domTextParts.push(sortedSpans[i].text);
+          charPos += sortedSpans[i].text.length;
+        }
+        const domText = domTextParts.join("");
+        const canvasText = charIndex.map(function (c) { return c.ch; }).join("");
+        let overlapPos = -1;
+        for (let len = Math.min(domText.length, 12); len >= 4; len--) {
+          const snippet = domText.slice(0, len);
+          overlapPos = canvasText.indexOf(snippet);
+          if (overlapPos !== -1) break;
+        }
+        if (overlapPos !== -1) {
+          fullText = canvasText.slice(0, overlapPos) + domText;
+          domTextStart = overlapPos;
+        } else {
+          fullText = canvasText + domText;
+          domTextStart = canvasText.length;
+        }
+        window.postMessage({
+          source: SOURCE, type: "chapter-updated",
+          url: location.href, text: fullText, charCount: charIndex.length,
+        }, "*");
+        debugMsg.overlapPos = overlapPos;
+        debugMsg.domTextStart = domTextStart;
+        debugMsg.fullTextLen = fullText.length;
+        debugMsg.domTextLen = domText.length;
+
+        // 用缓存的 s.top/s.left 匹配
+        let matchedSpanIdx = -1;
+        for (let i = 0; i < sortedSpans.length; i++) {
+          const s = sortedSpans[i];
+          if (clientX >= s.left - 6 && clientX <= s.left + 30 &&
+              clientY >= s.top - 6 && clientY <= s.top + 30) {
+            matchedSpanIdx = i;
+            break;
+          }
+        }
+        if (matchedSpanIdx !== -1) {
+          // 用字符位置而不是 span 索引（有些 span 包含多个字）
+          const matchedIdx = domTextStart + spanCharOffsets[matchedSpanIdx];
+          const matchedSpan = sortedSpans[matchedSpanIdx];
+          debugMsg.result = "dom-hit";
+          debugMsg.charIdx = matchedIdx;
+          debugMsg.spanIndex = matchedSpanIdx;
+          debugMsg.spanCharOffset = spanCharOffsets[matchedSpanIdx];
+          debugMsg.spanText = matchedSpan.text;
+          debugMsg.fullTextChar = fullText[matchedIdx] || "?";
+          debugMsg.spanTop = matchedSpan.top;
+          debugMsg.spanLeft = matchedSpan.left;
+          window.postMessage({ source: SOURCE, type: "debug-info", result: debugMsg }, "*");
+          return matchedIdx;
+        } else {
+          debugMsg.result = "dom-miss";
+          // 找最近的 span
+          let minDist = Infinity;
+          let nearest = null;
+          for (let i = 0; i < sortedSpans.length; i++) {
+            const s = sortedSpans[i];
+            const d = Math.abs(s.top - clientY) + Math.abs(s.left - clientX);
+            if (d < minDist) { minDist = d; nearest = s; }
+          }
+          if (nearest) {
+            debugMsg.nearestText = nearest.text;
+            debugMsg.nearestTop = nearest.top;
+            debugMsg.nearestLeft = nearest.left;
+          }
+        }
+      }
+    }
+    // DOM 未命中，走 canvas 分支前也发调试
+    if (debugMsg.result !== "dom-hit") {
+      window.postMessage({ source: SOURCE, type: "debug-info", result: debugMsg }, "*");
+    }
+
+    // DOM 里没找到，在 canvas charIndex 里找
+    // 注意：只有 idx < domTextStart 时才有效（重叠区域 charIndex 和 fullText 索引不一致）
+    let baseR = null;
+    let baseRatio = 1;
+    if (sm && canvasElements.length > 0) {
+      try {
+        baseR = canvasElements[0].getBoundingClientRect();
+        baseRatio = logicalToCss(canvasElements[0], charIndex.length > 0 ? charIndex[0].scaleX : 2);
+      } catch (e) {}
+    }
     for (let i = 0; i < charIndex.length; i++) {
       const c = charIndex[i];
-      const canvas = canvasElements[c.canvasIdx];
-      if (!canvas) continue;
-      const r = canvas.getBoundingClientRect();
+      if (domTextStart >= 0 && i >= domTextStart) continue;
+      let r, ratio;
+      if (scrollMode && baseR) {
+        r = baseR;
+        ratio = baseRatio;
+      } else {
+        const canvas = canvasElements[c.canvasIdx];
+        if (!canvas) continue;
+        r = canvas.getBoundingClientRect();
+        ratio = logicalToCss(canvas, c.scaleX);
+      }
       if (r.width === 0 || r.height === 0) continue;
-      const ratio = logicalToCss(canvas, c.scaleX);
-      const charLeft = r.left + c.x * ratio;
+      const charLeft = r.left + (c.x + (c.tx || 0)) * ratio;
       const charRight = charLeft + c.size * ratio;
-      const charTop = r.top + (c.y - c.size / 2) * ratio;
+      const charTop = r.top + (c.y + (c.ty || 0) - c.size / 2) * ratio;
       const charBottom = charTop + c.size * ratio;
       if (clientX >= charLeft - 2 && clientX <= charRight + 2 &&
           clientY >= charTop - 2 && clientY <= charBottom + 2) {
+        console.log("[VoxEcho] findCharAtPosition canvas命中: mouse=(" + clientX + "," + clientY +
+          ") idx=" + i + " char=" + c.ch);
         return i;
       }
     }
@@ -307,9 +798,48 @@
       return; // 纯点击，不是拖拽选中
     }
     const idx = findCharAtPosition(mouseDownPos.x, mouseDownPos.y);
+    // 总是更新 selectionStartCharIdx：找到设索引，没找到设 null，不能保留上次的值
     if (idx !== -1) {
       selectionStartCharIdx = idx;
-      console.log("[VoxEcho] 检测到拖拽选区起点 charIdx=" + idx + " char=" + charIndex[idx].ch);
+      const ch = fullText[idx] || "?";
+      const debugInfo = {
+        type: "selection-start",
+        mouseX: mouseDownPos.x,
+        mouseY: mouseDownPos.y,
+        charIdx: idx,
+        char: ch,
+        inCanvas: idx < charIndex.length,
+        inDom: domTextStart >= 0 && idx >= domTextStart,
+        charIndexLen: charIndex.length,
+        domTextStart: domTextStart,
+        fullTextLen: fullText.length,
+      };
+      // 如果是 DOM 部分，遍历 span 累加字符长度找到对应 span（不能直接用 idx-domTextStart 当 span 索引）
+      if (domTextStart >= 0 && idx >= domTextStart) {
+        const sorted = getSortedDomSpans();
+        const targetCharOffset = idx - domTextStart;
+        let charCount = 0;
+        for (let si = 0; si < sorted.length; si++) {
+          const spanLen = sorted[si].text.length;
+          if (charCount + spanLen > targetCharOffset) {
+            debugInfo.domSpanText = sorted[si].text;
+            debugInfo.domSpanTop = sorted[si].top;
+            debugInfo.domSpanLeft = sorted[si].left;
+            debugInfo.domSpanIndex = si;
+            break;
+          }
+          charCount += spanLen;
+        }
+      }
+      console.log("[VoxEcho] 划选起点: " + JSON.stringify(debugInfo));
+      window.postMessage({ source: SOURCE, type: "debug-info", result: debugInfo }, "*");
+    } else {
+      selectionStartCharIdx = null;
+      console.log("[VoxEcho] 划选起点未找到: mouse=(" + mouseDownPos.x + "," + mouseDownPos.y + ") charIndexLen=" + charIndex.length);
+      window.postMessage({
+        source: SOURCE, type: "debug-info",
+        result: { type: "selection-start", mouseX: mouseDownPos.x, mouseY: mouseDownPos.y, charIdx: -1, reason: "not-found", charIndexLen: charIndex.length, domTextStart: domTextStart },
+      }, "*");
     }
     mouseDownPos = null;
   });
@@ -331,45 +861,537 @@
     }
   }
 
+  // 合并 DOM 文本进 fullText（滚动模式下 canvas 只覆盖前半部分，后半部分是 DOM 渲染）
+  // 合并后通过 postMessage 通知 background 更新 fullText
+  // force=true 时总是更新（即使长度变短），确保 domText 和当前 span 列表一致
+  function mergeDomText(force) {
+    try {
+      const domText = extractDomText();
+      if (!domText || domText.length < 10) return false;
+      const canvasText = charIndex.map(function (c) { return c.ch; }).join("");
+      // 找 DOM 文本前 12 个字在 canvas 文本里的位置（处理重叠）
+      let overlapPos = -1;
+      for (let len = Math.min(domText.length, 12); len >= 4; len--) {
+        const snippet = domText.slice(0, len);
+        overlapPos = canvasText.indexOf(snippet);
+        if (overlapPos !== -1) break;
+      }
+      let merged;
+      if (overlapPos !== -1) {
+        merged = canvasText.slice(0, overlapPos) + domText;
+        domTextStart = overlapPos;
+      } else {
+        merged = canvasText + domText;
+        domTextStart = canvasText.length;
+      }
+      // force=true 或合并后更长时更新
+      if (force || merged.length > fullText.length) {
+        fullText = merged;
+        console.log("[VoxEcho] 合并DOM文本: canvasLen=" + canvasText.length +
+          " domLen=" + domText.length + " mergedLen=" + fullText.length +
+          " overlapPos=" + overlapPos + " force=" + !!force);
+        window.postMessage({
+          source: SOURCE,
+          type: "chapter-updated",
+          url: location.href,
+          text: fullText,
+          charCount: charIndex.length,
+        }, "*");
+        return true;
+      }
+      return false;
+    } catch (e) {
+      console.log("[VoxEcho] 合并DOM文本异常: " + e);
+      return false;
+    }
+  }
+
+  // 用 DOM（SPAN.wr_absolute）做视口定位：找视口内第一行文本，在 fullText 里搜索位置
+  // 滚动模式下 canvas 只覆盖前半部分，后半部分是 DOM 渲染的绝对定位 span
+  function findViewportStartFromDom(skipPunct) {
+    const debug = { step: "start", spansCount: 0, inViewCount: 0, firstLine: "", searchPos: -1, fullTextLen: 0, skipPunct: !!skipPunct };
+    try {
+      const spans = document.querySelectorAll("span.wr_absolute");
+      debug.spansCount = spans.length;
+      if (spans.length === 0) { debug.step = "no-spans"; postDomDebug(debug); return null; }
+      const viewportH = window.innerHeight;
+      const viewportW = window.innerWidth;
+      const inView = [];
+      for (let i = 0; i < spans.length; i++) {
+        const el = spans[i];
+        const txt = (el.textContent || "").trim();
+        if (!txt) continue;
+        const r = el.getBoundingClientRect();
+        if (r.top < -10 || r.top > viewportH - 10) continue;
+        if (r.left < -10 || r.left > viewportW + 10) continue;
+        inView.push({ text: txt, top: Math.round(r.top), left: Math.round(r.left) });
+      }
+      debug.inViewCount = inView.length;
+      if (inView.length === 0) { debug.step = "no-inview"; postDomDebug(debug); return null; }
+      // 按 top 分组（差值<15 视为同一行），每组内按 left 排序拼文本
+      inView.sort(function (a, b) { return a.top - b.top || a.left - b.left; });
+      const rows = [];
+      let currentRow = null;
+      for (let i = 0; i < inView.length; i++) {
+        const s = inView[i];
+        if (!currentRow || Math.abs(s.top - currentRow.top) > 15) {
+          if (currentRow) rows.push(currentRow);
+          currentRow = { top: s.top, chars: [] };
+        }
+        currentRow.chars.push(s.text);
+      }
+      if (currentRow) rows.push(currentRow);
+      debug.rowsCount = rows.length;
+      if (rows.length === 0) { debug.step = "no-rows"; postDomDebug(debug); return null; }
+      // 取第一行文本
+      const firstLineText = rows[0].chars.join("");
+      debug.firstLine = firstLineText.slice(0, 50);
+      debug.firstLineTop = rows[0].top;
+      if (!firstLineText) { debug.step = "empty-firstline"; postDomDebug(debug); return null; }
+      // 在 fullText 里搜索，用前 10 个字逐步缩短
+      debug.fullTextLen = fullText.length;
+      let searchPos = -1;
+      let usedLen = 0;
+      for (let len = Math.min(firstLineText.length, 10); len >= 3; len--) {
+        const snippet = firstLineText.slice(0, len);
+        searchPos = fullText.indexOf(snippet);
+        if (searchPos !== -1) { usedLen = len; break; }
+      }
+      debug.searchPos = searchPos;
+      debug.usedLen = usedLen;
+      if (searchPos === -1) {
+        debug.step = "not-found-in-fulltext";
+        postDomDebug(debug);
+        return null;
+      }
+      // skipPunct=true 时（翻页后）直接从视口第一行开始，不往后找标点
+      if (skipPunct) {
+        debug.step = "ok-skip-punct";
+        debug.charOffset = searchPos;
+        postDomDebug(debug);
+        return searchPos;
+      }
+      // 从搜索位置往后找第一个大标点
+      for (let i = searchPos; i < fullText.length && i < searchPos + 200; i++) {
+        if (MAJOR_PUNCT_RE.test(fullText[i])) {
+          debug.step = "ok";
+          debug.punctAt = i;
+          debug.charOffset = i + 1;
+          postDomDebug(debug);
+          return i + 1;
+        }
+      }
+      debug.step = "ok-no-punct";
+      debug.charOffset = searchPos;
+      postDomDebug(debug);
+      return searchPos;
+    } catch (e) {
+      debug.step = "exception";
+      debug.error = String(e);
+      postDomDebug(debug);
+      return null;
+    }
+  }
+
+  function postDomDebug(debug) {
+    try {
+      window.postMessage({ source: SOURCE, type: "debug-info", result: { domLocate: debug } }, "*");
+    } catch (e) {}
+  }
+
   // 用 charIndex 坐标找视口内第一个可见字符，再往后找第一个大标点
-  function findViewportSentenceStart() {
+  function findViewportSentenceStart(skipPunct) {
     if (charIndex.length === 0) return 0;
 
+    // 滚动模式下优先用 DOM 定位（canvas 只覆盖前半部分，后半部分是 DOM 渲染）
+    const scrollMode = isScrollMode();
+    let domDebug = { tried: false, result: null, reason: "" };
+    if (scrollMode) {
+      // 先合并最新的 DOM 文本进 fullText（canvas 滚出视口后不会自动重建）
+      mergeDomText();
+      domDebug.tried = true;
+      const domOffset = findViewportStartFromDom(skipPunct);
+      domDebug.result = domOffset;
+      if (domOffset !== null && domOffset > 0) {
+        // DOM 定位成功，通过诊断日志输出
+        window.postMessage({
+          source: SOURCE, type: "debug-info",
+          result: { result: "dom-ok", scrollMode: true, domOffset: domOffset, charIndexLen: charIndex.length, fullTextLen: fullText.length },
+        }, "*");
+        return domOffset;
+      }
+      domDebug.reason = domOffset === null ? "dom-returned-null" : "dom-returned-zero";
+    }
+
+    const scrollY = window.scrollY || window.pageYOffset || 0;
     const viewportH = window.innerHeight;
     const viewportW = window.innerWidth;
 
+    // 两个 canvas 共用同一个全局坐标系（fillText 的 y 是相对于第一个 canvas 顶部的）
+    // 统一用第一个 canvas 的位置作为基准，不能用各自 canvas 的位置（否则 canvas[1] 会偏下约 4000px）
+    let baseDocTop = 0;
+    let baseDocLeft = 0;
+    let baseRatio = 1;
+    try {
+      if (canvasElements.length > 0) {
+        const r0 = canvasElements[0].getBoundingClientRect();
+        baseDocTop = r0.top + scrollY;
+        baseDocLeft = r0.left + (window.scrollX || 0);
+        baseRatio = logicalToCss(canvasElements[0], charIndex.length > 0 ? charIndex[0].scaleX : 2);
+      }
+    } catch (e) {}
+
     let firstVisible = -1;
+    let checked = 0;
+    // 智能跳过章节标题：先遍历前100个字符识别第一行和第二行的字体大小。
+    // 如果第一行明显大于第二行（>20%），视为章节标题跳过；否则（无标题章节）不跳过。
+    let firstLineY = null;
+    let firstLineSize = 0;
+    let secondLineSize = 0;
+    let skipFirstLine = false;
+    for (let i = 0; i < Math.min(100, charIndex.length); i++) {
+      const c = charIndex[i];
+      if (c.isVirtual || c.canvasIdx === -1) continue;
+      if (firstLineY === null) {
+        firstLineY = c.y;
+        firstLineSize = c.size;
+      } else if (secondLineSize === 0 && Math.abs(c.y - firstLineY) > 3) {
+        secondLineSize = c.size;
+        if (firstLineSize > secondLineSize * 1.2) skipFirstLine = true;
+        break;
+      }
+    }
+
+    let debugCoords = [];
     for (let i = 0; i < charIndex.length; i++) {
       const c = charIndex[i];
-      const canvas = canvasElements[c.canvasIdx];
-      if (!canvas) continue;
-      const r = canvas.getBoundingClientRect();
-      if (r.width === 0 || r.height === 0) continue;
-      const ratio = logicalToCss(canvas, c.scaleX);
-      const charTop = r.top + (c.y - c.size / 2) * ratio;
-      const charLeft = r.left + c.x * ratio;
-      if (charTop >= -5 && charTop < viewportH && charLeft >= -5 && charLeft < viewportW) {
+      // 跳过虚拟句号
+      if (c.isVirtual || c.canvasIdx === -1) continue;
+      checked++;
+      const cv = canvasElements[c.canvasIdx];
+      let cvDocTop = baseDocTop;
+      let cvDocLeft = baseDocLeft;
+      let cvRatio = baseRatio;
+      if (cv) {
+        try {
+          const cr = cv.getBoundingClientRect();
+          cvDocTop = cr.top + scrollY;
+          cvDocLeft = cr.left + (window.scrollX || 0);
+          cvRatio = logicalToCss(cv, c.scaleX);
+        } catch (e) {}
+      }
+      const charAbsTop = cvDocTop + (c.y - c.size / 2) * cvRatio;
+      const charAbsLeft = cvDocLeft + c.x * cvRatio;
+
+      if (i < 15) {
+        debugCoords.push({ i: i, ch: c.ch, canvasIdx: c.canvasIdx, y: Math.round(c.y), size: c.size, absTop: Math.round(charAbsTop), isTitle: skipFirstLine && Math.abs(c.y - firstLineY) < 3 });
+      }
+
+      // 跳过章节标题行（如果识别到）
+      if (skipFirstLine && Math.abs(c.y - firstLineY) < 3) continue;
+
+      if (charAbsTop >= scrollY - 5 && charAbsTop < scrollY + viewportH &&
+          charAbsLeft >= -5 && charAbsLeft < viewportW + 5) {
         firstVisible = i;
         break;
       }
     }
 
-    if (firstVisible === -1) return 0;
+    // 调试：输出坐标计算详情
+    try {
+      window.postMessage({
+        source: SOURCE, type: "debug-info",
+        result: {
+          canvasViewportDebug: {
+            scrollY: Math.round(scrollY),
+            viewportH: viewportH,
+            baseDocTop: Math.round(baseDocTop),
+            firstLineY: firstLineY !== null ? Math.round(firstLineY) : null,
+            firstLineSize: firstLineSize,
+            secondLineSize: secondLineSize,
+            skipFirstLine: skipFirstLine,
+            baseRatio: baseRatio,
+            firstVisible: firstVisible,
+            checked: checked,
+            sampleCoords: debugCoords,
+          },
+        },
+      }, "*");
+    } catch (e) {}
+
+    if (firstVisible === -1) {
+      // 组织调试信息，通过诊断日志通道输出
+      const byCanvas = {};
+      charIndex.forEach(function (c) {
+        if (!byCanvas[c.canvasIdx]) byCanvas[c.canvasIdx] = { minY: Infinity, maxY: -Infinity, count: 0 };
+        byCanvas[c.canvasIdx].minY = Math.min(byCanvas[c.canvasIdx].minY, c.y);
+        byCanvas[c.canvasIdx].maxY = Math.max(byCanvas[c.canvasIdx].maxY, c.y);
+        byCanvas[c.canvasIdx].count++;
+      });
+      const canvasInfo = canvasElements.map(function (cv, ci) {
+        try {
+          const r = cv.getBoundingClientRect();
+          const info = byCanvas[ci] || { count: 0 };
+          return {
+            idx: ci,
+            docTop: Math.round(r.top + scrollY),
+            docBottom: Math.round(r.bottom + scrollY),
+            cssH: Math.round(r.height),
+            cssW: Math.round(r.width),
+            chars: info.count,
+            yRange: info.count ? Math.round(info.minY) + "~" + Math.round(info.maxY) : null,
+          };
+        } catch (e) {
+          return { idx: ci, error: String(e) };
+        }
+      });
+      // 枚举页面上所有 canvas，看是否有未被采集的新 canvas 在视口内
+      const allCanvases = [];
+      try {
+        document.querySelectorAll("canvas").forEach(function (cv, ci) {
+          const r = cv.getBoundingClientRect();
+          const inViewport = r.bottom > 0 && r.top < viewportH;
+          allCanvases.push({
+            idx: ci,
+            docTop: Math.round(r.top + scrollY),
+            docBottom: Math.round(r.bottom + scrollY),
+            cssH: Math.round(r.height),
+            cssW: Math.round(r.width),
+            inViewport: inViewport,
+            known: canvasElements.indexOf(cv) !== -1,
+          });
+        });
+      } catch (e) {}
+
+      // 探测视口中心的元素，看文字到底渲染在哪里
+      let centerElInfo = null;
+      try {
+        const cx = Math.round(viewportW / 2);
+        const cy = Math.round(viewportH / 2);
+        const el = document.elementFromPoint(cx, cy);
+        if (el) {
+          const chain = [];
+          let node = el;
+          for (let i = 0; i < 6 && node; i++) {
+            chain.push({
+              tag: node.tagName,
+              cls: node.className || "",
+              id: node.id || "",
+            });
+            node = node.parentElement;
+          }
+          centerElInfo = {
+            tag: el.tagName,
+            cls: el.className || "",
+            textPreview: (el.textContent || "").slice(0, 100),
+            parentChain: chain,
+          };
+        }
+      } catch (e) {
+        centerElInfo = { error: String(e) };
+      }
+
+      // 探测 .passage-content DOM 结构（滚动模式下正文可能在 DOM 里）
+      let passageInfo = null;
+      try {
+        const passageContent = document.querySelector(".passage-content");
+        if (passageContent) {
+          const children = passageContent.children;
+          const texts = [];
+          for (let i = 0; i < Math.min(children.length, 10); i++) {
+            const t = children[i].textContent || "";
+            texts.push(t.slice(0, 50));
+          }
+          let fullLen = 0;
+          for (let i = 0; i < children.length; i++) {
+            fullLen += (children[i].textContent || "").length;
+          }
+          passageInfo = {
+            childCount: children.length,
+            totalTextLen: fullLen,
+            firstChildrenPreview: texts,
+            firstChildClass: children.length > 0 ? (children[0].className || "") : "",
+            firstChildTag: children.length > 0 ? children[0].tagName : "",
+          };
+        }
+      } catch (e) {
+        passageInfo = { error: String(e) };
+      }
+
+      // 全面探测：枚举视口内所有有文本的可见元素
+      let visibleTextElements = [];
+      try {
+        const allElements = document.querySelectorAll("div, span, p");
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        for (let i = 0; i < allElements.length && visibleTextElements.length < 20; i++) {
+          const el = allElements[i];
+          const txt = (el.textContent || "").trim();
+          if (!txt || txt.length < 1) continue;
+          // 叶子节点：没有子元素，或子元素都是非元素节点
+          const hasElementChild = Array.from(el.children).some(function(c) { return c.textContent.trim(); });
+          if (hasElementChild) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          if (r.bottom < 0 || r.top > vh) continue;
+          if (r.right < 0 || r.left > vw) continue;
+          visibleTextElements.push({
+            tag: el.tagName,
+            cls: (el.className || "").toString().slice(0, 60),
+            text: txt.slice(0, 30),
+            top: Math.round(r.top),
+            left: Math.round(r.left),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          });
+        }
+      } catch (e) {
+        visibleTextElements = [{ error: String(e) }];
+      }
+
+      // 专门探测视口内所有 SPAN.wr_absolute（DOM 渲染区域的正文元素）
+      let wrAbsoluteSpans = [];
+      let wrAbsoluteStats = null;
+      try {
+        const spans = document.querySelectorAll("span.wr_absolute");
+        const vh = window.innerHeight;
+        let totalLen = 0;
+        let inViewportCount = 0;
+        const allSpans = [];
+        for (let i = 0; i < spans.length; i++) {
+          const el = spans[i];
+          const txt = (el.textContent || "").trim();
+          totalLen += txt.length;
+          const r = el.getBoundingClientRect();
+          allSpans.push({ text: txt, top: Math.round(r.top), left: Math.round(r.left) });
+          if (r.bottom >= -50 && r.top <= vh + 50) inViewportCount++;
+        }
+        // 按 top 分组，每组内按 left 排序，输出前 5 行
+        allSpans.sort(function(a, b) { return a.top - b.top || a.left - b.left; });
+        const rows = [];
+        let currentRow = null;
+        for (let i = 0; i < allSpans.length && rows.length < 6; i++) {
+          const s = allSpans[i];
+          if (!currentRow || Math.abs(s.top - currentRow.top) > 15) {
+            if (currentRow) rows.push(currentRow);
+            currentRow = { top: s.top, chars: [] };
+          }
+          currentRow.chars.push(s.text);
+        }
+        if (currentRow) rows.push(currentRow);
+        wrAbsoluteStats = {
+          totalCount: spans.length,
+          totalTextLen: totalLen,
+          inViewportCount: inViewportCount,
+          firstRowsPreview: rows.map(function(r) { return r.top + ": " + r.chars.join(""); }),
+        };
+        // 视口内的 span（限制 25 个）
+        for (let i = 0; i < allSpans.length && wrAbsoluteSpans.length < 25; i++) {
+          const s = allSpans[i];
+          if (s.top >= -50 && s.top <= vh + 50) {
+            wrAbsoluteSpans.push(s);
+          }
+        }
+      } catch (e) {
+        wrAbsoluteStats = { error: String(e) };
+      }
+
+      // 探测 #renderTargetContent 的子元素结构
+      let renderTargetInfo = null;
+      try {
+        const rtc = document.getElementById("renderTargetContent");
+        if (rtc) {
+          const children = [];
+          for (let i = 0; i < rtc.children.length; i++) {
+            const el = rtc.children[i];
+            const r = el.getBoundingClientRect();
+            children.push({
+              tag: el.tagName,
+              cls: (el.className || "").toString().slice(0, 50),
+              childCount: el.children.length,
+              textLen: (el.textContent || "").length,
+              top: Math.round(r.top),
+              h: Math.round(r.height),
+              inViewport: r.bottom > 0 && r.top < viewportH,
+            });
+          }
+          renderTargetInfo = { childCount: rtc.children.length, children: children };
+        }
+      } catch (e) {
+        renderTargetInfo = { error: String(e) };
+      }
+
+      const debugInfo = {
+        result: "no-visible-char",
+        charIndexLen: charIndex.length,
+        checked: checked,
+        scrollY: Math.round(scrollY),
+        viewportH: viewportH,
+        viewportRange: Math.round(scrollY) + "~" + Math.round(scrollY + viewportH),
+        scrollMode: scrollMode,
+        domDebug: domDebug,
+        canvases: canvasInfo,
+        allCanvasesOnPage: allCanvases,
+        centerElement: centerElInfo,
+        passageContent: passageInfo,
+        visibleTextElements: visibleTextElements,
+        wrAbsoluteSpans: wrAbsoluteSpans,
+        wrAbsoluteStats: wrAbsoluteStats,
+        renderTargetContent: renderTargetInfo,
+      };
+      console.log("[VoxEcho] 视口定位未找到可见字符", JSON.stringify(debugInfo));
+      window.postMessage({ source: SOURCE, type: "debug-info", result: debugInfo }, "*");
+      return 0;
+    }
+
+    // skipPunct=true 时（翻页后）直接从视口第一个可见字符开始，不往后找标点
+    if (skipPunct) {
+      const okInfo = {
+        result: "ok-skip-punct",
+        firstVisible: firstVisible,
+        firstChar: charIndex[firstVisible].ch,
+        charOffset: firstVisible,
+      };
+      console.log("[VoxEcho] 视口定位成功(翻页跳过标点)", JSON.stringify(okInfo));
+      window.postMessage({ source: SOURCE, type: "debug-info", result: okInfo }, "*");
+      return firstVisible;
+    }
 
     for (let i = firstVisible; i < charIndex.length; i++) {
       if (MAJOR_PUNCT_RE.test(charIndex[i].ch)) {
+        const okInfo = {
+          result: "ok",
+          firstVisible: firstVisible,
+          firstChar: charIndex[firstVisible].ch,
+          punctAt: i,
+          charOffset: i + 1,
+        };
+        console.log("[VoxEcho] 视口定位成功", JSON.stringify(okInfo));
+        window.postMessage({ source: SOURCE, type: "debug-info", result: okInfo }, "*");
         return i + 1;
       }
     }
 
+    const okInfo = {
+      result: "ok-no-punct",
+      firstVisible: firstVisible,
+      firstChar: charIndex[firstVisible].ch,
+      charOffset: firstVisible,
+    };
+    console.log("[VoxEcho] 视口定位成功(无标点)", JSON.stringify(okInfo));
+    window.postMessage({ source: SOURCE, type: "debug-info", result: okInfo }, "*");
     return firstVisible;
   }
 
-  function getStartIndex() {
+  function getStartIndex(fromViewportStart) {
     // 优先：鼠标拖拽选中的起点
     if (selectionStartCharIdx !== null && selectionStartCharIdx > 0) {
       const offset = selectionStartCharIdx;
       selectionStartCharIdx = null; // 消费一次，避免下次还从这里开始
+      // 如果划选位置在 DOM 部分（超出 charIndex 范围），先合并 DOM 文本确保 fullText 完整
+      if (offset >= charIndex.length && isScrollMode()) {
+        mergeDomText();
+      }
       return { segmentIndex: 0, charOffset: offset };
     }
     // 其次：DOM 选区（canvas 渲染通常拿不到）
@@ -377,8 +1399,8 @@
     if (selOffset !== null && selOffset > 0) {
       return { segmentIndex: 0, charOffset: selOffset };
     }
-    // 兜底：视口首个标点后
-    return { segmentIndex: 0, charOffset: findViewportSentenceStart() };
+    // 兜底：视口首个标点后（fromViewportStart=true 时跳过标点，直接从视口第一句开始）
+    return { segmentIndex: 0, charOffset: findViewportSentenceStart(fromViewportStart) };
   }
 
   // ---------- 空页指纹 ----------
@@ -410,7 +1432,7 @@
         clearHighlight();
         break;
       case "get-start-index":
-        window.postMessage({ source: SOURCE, type: "start-index", result: getStartIndex() }, "*");
+        window.postMessage({ source: SOURCE, type: "start-index", result: getStartIndex(d.fromViewportStart) }, "*");
         break;
       case "get-empty-fingerprint":
         window.postMessage({ source: SOURCE, type: "empty-fingerprint", result: getEmptyPageFingerprint() }, "*");
@@ -436,6 +1458,8 @@
         if (overlays[i] && overlays[i].el && overlays[i].el.parentNode) {
           overlays[i].el.parentNode.removeChild(overlays[i].el);
         }
+        const removedEl = canvasElements[i];
+        charIndex = charIndex.filter(function (c) { return c.el !== removedEl; });
         canvasElements.splice(i, 1);
         overlays.splice(i, 1);
         charIndex.forEach(function (c) { if (c.canvasIdx > i) c.canvasIdx--; });

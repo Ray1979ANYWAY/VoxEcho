@@ -51,6 +51,8 @@ const DEFAULT_STATE = {
   emptyLastFingerprint: null,
   emptyLastTurnAt: 0,
   pendingTrailingText: null, // 页尾非终结标点的半句，翻页后与下一页开头合并
+  lastCharOffset: 0, // 当前朗读起始位置（翻页前用于生成锚点）
+  pageAnchorText: null, // 翻页前记录的锚点文本（当前朗读位置后面的100字）
 };
 
 const MAX_MISS_BEFORE_TURN = 3;
@@ -119,13 +121,16 @@ function buildChunksFromChapterData(items) {
 // ---- 开始朗读 ----
 // prefixText: 上一页页尾缓存的半句（非终结标点结尾），与当前页文本拼接后再切块，
 // 实现"页尾一小段放到下一个 chunk 一起读"，避免句子在翻页处被断开。
-async function startReading(tabId, voice, rate, { fromStart = false, prefixText = "" } = {}) {
+async function startReading(tabId, voice, rate, { fromStart = false, prefixText = "", fromOffset = null, fromViewportStart = false } = {}) {
   clearNextChapterTimeout();
   let charOffset = 0;
 
-  if (!fromStart) {
+  if (fromOffset !== null && fromOffset >= 0) {
+    // 直接从指定字符位置开始（滚动模式翻页后增量追加，从旧文本末尾继续）
+    charOffset = fromOffset;
+  } else if (!fromStart) {
     try {
-      const result = await chrome.tabs.sendMessage(tabId, { type: "WEREAD_GET_START_INDEX" });
+      const result = await chrome.tabs.sendMessage(tabId, { type: "WEREAD_GET_START_INDEX", fromViewportStart });
       if (result) {
         if (typeof result.segmentIndex === "number") charOffset = result.segmentIndex;
         if (typeof result.charOffset === "number") charOffset = result.charOffset;
@@ -186,6 +191,7 @@ async function startReading(tabId, voice, rate, { fromStart = false, prefixText 
     emptyLastFingerprint: null,
     emptyLastTurnAt: 0,
     pendingTrailingText: pendingTrailing,
+    lastCharOffset: charOffset,
   });
 
   chrome.tabs.sendMessage(tabId, { type: "WEREAD_START_READING" }).catch(() => {});
@@ -225,8 +231,96 @@ export function handleWereadMessage(message, sender, sendResponse) {
     case "WEREAD_CHAPTER_UPDATED": {
       if (!sender.tab) return;
       (async () => {
-        await saveChapterForTab(sender.tab.id, message.url, message.data);
+        // 保存新章节前先获取旧章节，用于找到接续位置
+        const oldChapter = await getChapterForTab(sender.tab.id);
+        const oldText = oldChapter && oldChapter.data ? oldChapter.data.map((d) => d.text).join("") : "";
+        const newText = message.data ? message.data.map((d) => d.text).join("") : "";
+        const isAppend = oldText.length > 0 && newText.length > oldText.length && newText.startsWith(oldText);
         const state = await getReadingState();
+
+        // 即使不是前缀追加，也尝试用旧文本片段在新文本中搜索接续位置
+        // （滚动模式翻页后 canvas 重绘，文本从章节开头重新采集，旧文本是新文本的中间子串）
+        let continueOffset = -1;
+
+        // 优先用翻页前记录的锚点（当前朗读位置后面的100字）
+        // 虚拟滚动模式下坐标定位不可靠，文本锚点是最准确的
+        if (state.pageAnchorText && state.pageAnchorText.length >= 20 && newText.length > 0) {
+          const anchor = state.pageAnchorText;
+          // 尝试完整锚点，失败则尝试锚点的后半段（避免前半段在翻页时被截断）
+          const searchCandidates = [
+            anchor,
+            anchor.slice(20),
+            anchor.slice(40),
+            anchor.slice(0, 60),
+            anchor.slice(0, 40),
+          ];
+          for (let ai = 0; ai < searchCandidates.length; ai++) {
+            const snippet = searchCandidates[ai];
+            if (snippet.length < 15) continue;
+            const foundPos = newText.indexOf(snippet);
+            if (foundPos !== -1) {
+              // 锚点在旧文本中的起始位置
+              const anchorStartInOld = oldText.indexOf(anchor);
+              if (anchorStartInOld !== -1) {
+                const remainingAfterAnchor = oldText.length - (anchorStartInOld + anchor.length);
+                continueOffset = foundPos + snippet.length + remainingAfterAnchor;
+                if (continueOffset >= 0 && continueOffset < newText.length) {
+                  logEvent("background", `[weread] 翻页锚点命中: 候选${ai}(${snippet.length}字), 匹配到${foundPos}, 接续位置${continueOffset}`);
+                  break;
+                }
+              }
+            }
+          }
+          if (continueOffset < 0) {
+            logEvent("background", `[weread] 翻页锚点未命中，回退到多位置片段搜索`);
+          }
+        }
+
+        if (continueOffset < 0 && !isAppend && oldText.length > 30 && newText.length > 0) {
+          // 调试：输出新旧文本开头对比，排查为什么开头搜索失败
+          logEvent("background", `[weread] 片段搜索调试: oldStart="${oldText.slice(0, 30)}" newStart="${newText.slice(0, 30)}" oldLen=${oldText.length} newLen=${newText.length}`);
+          // 旧文本可能是 canvas+DOM 混合，翻页后新文本是纯 canvas。
+          // 优先用旧文本开头搜索（最唯一），如果开头有差异则用靠前的 canvas 部分位置。
+          const candidates = [
+            { snippet: oldText.slice(0, 25), isStart: true },   // 开头25字（最优先）
+            { snippet: oldText.slice(0, 15), isStart: true },   // 开头15字（兜底）
+            // 微信读书 canvas 虚拟渲染：翻页前后开头可能不同（小节标题只在旧文本中），
+            // 所以用正文部分的多个位置搜索（旧文本前几百字可能是小节标题，新文本中没有）
+            { snippet: oldText.slice(300, 325), isStart: false }, // 第300字起（正文部分）
+            { snippet: oldText.slice(400, 425), isStart: false }, // 第400字起
+            { snippet: oldText.slice(500, 525), isStart: false }, // 第500字起
+            { snippet: oldText.slice(600, 625), isStart: false }, // 第600字起
+            { snippet: oldText.slice(800, 825), isStart: false }, // 第800字起
+            { snippet: oldText.slice(1000, 1025), isStart: false }, // 第1000字起
+            { snippet: oldText.slice(-25), isStart: false },    // 末尾25字
+            { snippet: oldText.slice(-60, -35), isStart: false }, // 末尾前35~60字
+          ];
+          for (let ci = 0; ci < candidates.length; ci++) {
+            const snippet = candidates[ci].snippet;
+            const isStart = candidates[ci].isStart;
+            if (snippet.length < 8) continue;
+            const foundPos = newText.indexOf(snippet);
+            if (foundPos !== -1) {
+              if (isStart) {
+                // 开头片段：接续位置 = 旧文本开头在新文本中的位置 + 旧文本长度
+                continueOffset = foundPos + oldText.length;
+              } else {
+                // 中间/末尾片段：计算片段在旧文本中的位置，推算接续位置
+                const snippetStartInOld = oldText.indexOf(snippet);
+                if (snippetStartInOld !== -1) {
+                  const remainingAfterSnippet = oldText.length - (snippetStartInOld + snippet.length);
+                  continueOffset = foundPos + snippet.length + remainingAfterSnippet;
+                }
+              }
+              if (continueOffset >= 0 && continueOffset < newText.length) {
+                logEvent("background", `[weread] 片段搜索命中: 候选位置${ci}(${isStart ? "开头" : "中间"}), 匹配到${foundPos}, 接续位置${continueOffset}`);
+                break;
+              }
+            }
+          }
+        }
+
+        await saveChapterForTab(sender.tab.id, message.url, message.data);
         if (state.tabId === sender.tab.id && message.data && message.data.length > 0) {
           if (state.emptyLastFingerprint || state.emptyPageStallCount) {
             logEvent("background", "[weread] 采集到有文本章节，重置空页翻页状态");
@@ -240,7 +334,39 @@ export function handleWereadMessage(message, sender, sendResponse) {
           message.data &&
           message.data.length > 0
         ) {
-          if (state.pendingTrailingText) {
+          if (isAppend) {
+            // 增量追加：从旧文本末尾继续
+            logEvent("background", `[weread] 增量追加 ${oldText.length}→${newText.length}，从 ${oldText.length} 继续`);
+            await startReading(sender.tab.id, state.voice, state.rate, {
+              fromOffset: oldText.length,
+              prefixText: state.pendingTrailingText || "",
+            });
+          } else if (continueOffset >= 0 && continueOffset < newText.length) {
+            // 翻页后查询视口起始位置（跳过导航条/章节标题，从正文第一句开始）
+            let viewportOffset = -1;
+            try {
+              const vpResult = await chrome.tabs.sendMessage(sender.tab.id, { type: "WEREAD_GET_START_INDEX", fromViewportStart: true });
+              if (vpResult && vpResult.charOffset !== undefined && vpResult.charOffset > 0) {
+                viewportOffset = vpResult.charOffset;
+              }
+            } catch (e) {
+              logEvent("background", `[weread] 翻页后视口定位查询失败: ${e.message}`);
+            }
+
+            if (viewportOffset > 0) {
+              logEvent("background", `[weread] 翻页后视口定位成功，从正文第一句 ${viewportOffset} 开始朗读`);
+              await startReading(sender.tab.id, state.voice, state.rate, {
+                fromOffset: viewportOffset,
+                prefixText: state.pendingTrailingText || "",
+              });
+            } else {
+              logEvent("background", `[weread] 翻页后视口定位失败，从新文本开头开始朗读`);
+              await startReading(sender.tab.id, state.voice, state.rate, {
+                fromOffset: 0,
+                prefixText: state.pendingTrailingText || "",
+              });
+            }
+          } else if (state.pendingTrailingText) {
             logEvent("background", `[weread] 下一章已采集，合并页尾 ${state.pendingTrailingText.length} 字后继续朗读`);
             await startReading(sender.tab.id, state.voice, state.rate, {
               fromStart: true,
@@ -440,12 +566,29 @@ export function handleWereadMessage(message, sender, sendResponse) {
       (async () => {
         const state = await getReadingState();
         if (!state.isReading || !state.tabId) return;
+
+        // 翻页前记录锚点：当前朗读位置后面的 100 个字
+        // （虚拟滚动模式下坐标定位不可靠，用文本锚点搜索更准确）
+        let anchorText = null;
+        try {
+          const chapter = await getChapterForTab(state.tabId);
+          if (chapter && chapter.data) {
+            const fullText = chapter.data.map((d) => d.text).join("");
+            const anchorStart = state.lastCharOffset || 0;
+            anchorText = fullText.slice(anchorStart, anchorStart + 100);
+            if (anchorText.length < 20) anchorText = null;
+          }
+        } catch (e) {}
+
         if (state.pendingTrailingText) {
           logEvent("background", `[weread] 队列读完，页尾有 ${state.pendingTrailingText.length} 字待合并，翻页后与下一页拼接`);
         } else {
           logEvent("background", "[weread] 本章朗读结束，请求切下一章");
         }
-        await setReadingState({ waitingForNextChapter: true });
+        await setReadingState({ waitingForNextChapter: true, pageAnchorText: anchorText });
+        if (anchorText) {
+          logEvent("background", `[weread] 翻页锚点已记录: ${textPreview(anchorText, 30)}`);
+        }
         chrome.tabs.sendMessage(state.tabId, { type: "WEREAD_NEXT_CHAPTER" }).catch(() => {});
         armNextChapterTimeout(state.tabId);
       })();
